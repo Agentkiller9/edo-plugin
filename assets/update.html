@@ -124,7 +124,7 @@
   }
 
   async function load() {
-    const res = await fetch(`/plugins/edo_plugin/admin/challenges/${chal}/flag_weights`);
+    const res = await CTFd.fetch(`/plugins/edo_plugin/admin/challenges/${chal}/flag_weights`);
     const j = await res.json();
     list.innerHTML = (j.flags || []).map(row).join("") ||
       '<p class="text-muted">No flags yet — add one from the Flags tab first.</p>';
@@ -142,8 +142,8 @@
   list.addEventListener("change", async (ev) => {
     const row = ev.target.closest("[data-flag-id]");
     if (!row) return;
-    await fetch(`/plugins/edo_plugin/admin/flags/${row.dataset.flagId}/weight`, {
-      method: "PATCH", headers: {"Content-Type": "application/json"},
+    await CTFd.fetch(`/plugins/edo_plugin/admin/flags/${row.dataset.flagId}/weight`, {
+      method: "PATCH",
       body: JSON.stringify({
         weight_pct: parseInt(row.querySelector(".edo-f-weight").value, 10) || 0,
       }),

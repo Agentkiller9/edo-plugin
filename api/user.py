@@ -74,6 +74,17 @@ def dashboard_data():
     )
 
 
+@user_bp.route("/challenges/<int:challenge_id>/progress", methods=["GET"])
+@authed_only
+@owner_required
+def challenge_progress(challenge_id: int):
+    """Weighted multi-flag progress for the current owner on one challenge."""
+    from ..challenge_type import owner_progress
+
+    owner_type, owner_id = resolve_owner()
+    return jsonify(success=True, **owner_progress(challenge_id, owner_type, owner_id))
+
+
 # ---------- Container lifecycle ----------
 
 @user_bp.route("/challenges/<int:challenge_id>/instance", methods=["POST"])

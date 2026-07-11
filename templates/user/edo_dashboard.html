@@ -82,7 +82,7 @@
   }
 
   async function refresh() {
-    const res = await fetch("/plugins/edo_plugin/dashboard/data");
+    const res = await CTFd.fetch("/plugins/edo_plugin/dashboard/data");
     if (!res.ok) return;
     const data = await res.json();
     if (!data.success) return;
@@ -118,11 +118,11 @@
     const t = ev.target;
     if (t.classList.contains("edo-teardown")) {
       if (!confirm("Stop this instance?")) return;
-      await fetch(`/plugins/edo_plugin/instances/${t.dataset.id}`, { method: "DELETE" });
+      await CTFd.fetch(`/plugins/edo_plugin/instances/${t.dataset.id}`, { method: "DELETE" });
       refresh();
     }
     if (t.classList.contains("edo-extend")) {
-      const res = await fetch(
+      const res = await CTFd.fetch(
         `/plugins/edo_plugin/instances/${t.dataset.id}/extend`, { method: "POST" });
       const json = await res.json();
       if (!json.success) alert(json.error || "Cannot extend yet.");

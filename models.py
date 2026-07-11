@@ -201,6 +201,26 @@ class EdoPeer(db.Model):
     revoked = db.Column(db.Boolean, default=False, nullable=False)
 
 
+class EdoWorkerLease(db.Model):
+    """
+    Leader-election row so background jobs (TTL sweep, reconciler) run on
+    exactly one gunicorn worker, not once per worker.
+
+    A worker "holds" a lock by winning a conditional UPDATE (only succeeds
+    if the lease is unheld, expired, or already held by that same worker)
+    or, if the row doesn't exist yet, an INSERT. Both are atomic at the row
+    level under any of CTFd's supported databases (MySQL, Postgres, SQLite)
+    — no external lock service (Redis, etcd) required.
+    """
+
+    __tablename__ = "edo_worker_leases"
+
+    lock_name = db.Column(db.String(64), primary_key=True)
+    holder = db.Column(db.String(64), nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
 class EdoSettings(db.Model):
     """Key/value store for admin-tunable plugin settings."""
 

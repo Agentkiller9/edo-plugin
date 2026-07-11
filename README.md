@@ -22,7 +22,8 @@ below for why.
   owner (enforced server-side, not just via the client's AllowedIPs).
 - **Multi-flag challenges**: A single challenge can have several flags —
   CTFd's own native Flags table and flag-editor UI, unmodified. The only
-  addition is a percentage weight per flag, so partial credit works.
+  addition is a percentage weight per flag, so partial credit works and the
+  challenge modal shows live "N/M flags captured" progress.
 - **Difficulty tiers**: Easy (green) / Medium (yellow) / Hard (red) / Very
   Hard (purple), rendered on challenge cards.
 - **Scoring**: Static or dynamic (linear decay).
@@ -288,26 +289,52 @@ In the admin UI, pick type **edo** when creating a challenge. You get:
 - **Build paths are admin-supplied**, not participant input — `spawn_instance`
   runs `docker build` against whatever path the challenge record has, so
   don't expose challenge creation to non-admins.
+- **Every mutating request uses `CTFd.fetch()`, never a bare `fetch()`.**
+  CTFd enforces CSRF globally (a `before_request` hook checks a `CSRF-Token`
+  header on every POST/PUT/PATCH/DELETE, including plugin blueprint routes —
+  there's no automatic exemption by blueprint name). `CTFd.fetch()` attaches
+  that header from `window.init.csrfNonce` automatically; a raw `fetch()`
+  would get silently rejected with a 403. If you add new admin/user actions,
+  keep using `CTFd.fetch()` in the JS.
+- **Background jobs are leader-elected, not per-worker.** CTFd typically
+  runs multiple gunicorn workers, each of which calls `start_scheduler()` —
+  without coordination that's N schedulers all sweeping/reconciling
+  independently. `EdoWorkerLease` (models.py) is a DB-backed lease row: each
+  tick, a worker wins it via a conditional UPDATE (or an INSERT if the row
+  doesn't exist yet) before doing any real work, so exactly one worker acts
+  per tick regardless of how many gunicorn processes are running. See
+  `scheduler.py`'s `_try_acquire_lease()`.
+
+## Admin dashboard
+
+`/plugins/edo_plugin/admin/settings` is a single page covering:
+
+- Runtime settings (container caps, TTLs, rate limits, VPN endpoint)
+- **Live instances** — every tracked container across every owner, with a
+  per-row force-stop button
+- **Audit log** — the last 100 infrastructure events (spawns, teardowns,
+  extends, orphan detections, reconciler drift)
+- **Kill switch** — stops every tracked container in one action (leaves VPN
+  peers intact)
+- **Generate all VPN peers** — bulk-provisions a WireGuard peer for every
+  active user that doesn't have one yet
 
 ## Development status
 
-This is a **walking skeleton**: the full owner-model rewrite, the daemon
-(WireGuard, per-owner networks, iptables isolation, container lifecycle),
-and the CTFd-side models/API/scoring are all real, working code — not
-stubs. Known gaps before calling this production-ready:
+The full owner-model rewrite, the daemon (WireGuard, per-owner networks,
+iptables isolation, container lifecycle, leader-elected background jobs),
+and the CTFd-side models/API/scoring/admin dashboard are all real, working
+code — not stubs. Known gaps before calling this production-ready:
 
-- **Admin instance/audit views are API-only.** `GET /admin/instances` and
-  `GET /admin/audit` return JSON; there's no dedicated HTML dashboard yet
-  (just the settings page). The data needed for one is already there.
-- **No leader election for background workers.** If CTFd runs multiple
-  gunicorn workers, each starts its own APScheduler instance. The TTL sweep
-  and reconciler are idempotent so this is wasteful rather than unsafe, but
-  it's not the single-worker guarantee a production deployment should have.
 - **Only Dockerfile-based challenges**, not docker-compose multi-service
   ones — edo's compose deployment path wasn't ported.
 - **Client-side WireGuard keys** (participant generates their own keypair,
   server never sees the private key) are supported by the daemon
   (`wg.ensure_peer` takes an optional public key) but no UI exposes it yet.
+- **No automated test suite.** Everything has been verified by direct
+  inspection, standalone smoke tests of the daemon's core modules, and a
+  from-scratch correctness test of the leader-election algorithm — but
+  there's no pytest suite exercising the Flask routes end-to-end yet.
 
 ## License
 

@@ -5,6 +5,15 @@ We use APScheduler's BackgroundScheduler — it ships with CTFd's deps in most
 deployments; if not, `pip install apscheduler` is required. Both jobs use the
 same coalescing config so if a worker is asleep, we don't stack up runs.
 
+CTFd typically runs multiple gunicorn workers, and start_scheduler(app) is
+called once per worker process — naively, that means N schedulers all
+sweeping/reconciling independently. Both jobs are idempotent (a double
+teardown or double reconcile is harmless), but running them N times is
+wasteful and N-times more daemon RPC traffic for no benefit. Instead, each
+tick first tries to win a lease row (EdoWorkerLease) before doing any real
+work; only the worker holding the lease for that lock proceeds. See
+_try_acquire_lease().
+
 Important lifecycle note:
     Flask-SQLAlchemy sessions are request-scoped by default. Inside these
     background jobs there is no request context, so we push the Flask app
@@ -15,17 +24,25 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+import os
+import uuid
+from datetime import datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlalchemy.exc import IntegrityError
 
 from .config import EdoConfig
 from .daemon_client import DaemonError, EdoDaemonClient
-from .models import EdoAuditLog, EdoInstance, EdoSettings, db
+from .models import EdoAuditLog, EdoInstance, EdoSettings, EdoWorkerLease, db
 
 logger = logging.getLogger("edo.scheduler")
 
 _scheduler: BackgroundScheduler | None = None
+
+# Unique per process — every gunicorn worker gets its own on import. Good
+# enough for leader election even though it's not a stable identity across
+# restarts; a fresh id just means a fresh worker starts uncontested.
+_WORKER_ID = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 
 def start_scheduler(app):
@@ -49,18 +66,24 @@ def start_scheduler(app):
         cast=int,
     ) or EdoConfig.DEFAULT_RECONCILE_INTERVAL_SECONDS)
 
+    # Lease outlives its own interval by 3x so the current leader's next
+    # tick renews it well before it lapses; if the leader process dies, a
+    # new leader takes over within one lease window at most.
     scheduler.add_job(
-        lambda: _run_with_app(app, _sweep_expired),
+        lambda: _run_with_app(app, _sweep_expired, "edo.ttl_sweep", ttl_interval * 3),
         "interval", seconds=ttl_interval, id="edo.ttl_sweep",
     )
     scheduler.add_job(
-        lambda: _run_with_app(app, _reconcile),
+        lambda: _run_with_app(app, _reconcile, "edo.reconcile", recon_interval * 3),
         "interval", seconds=recon_interval, id="edo.reconcile",
     )
 
     scheduler.start()
     _scheduler = scheduler
-    logger.info("edo scheduler started (ttl=%ss, reconcile=%ss)", ttl_interval, recon_interval)
+    logger.info(
+        "edo scheduler started (worker=%s, ttl=%ss, reconcile=%ss)",
+        _WORKER_ID, ttl_interval, recon_interval,
+    )
     return scheduler
 
 
@@ -71,9 +94,52 @@ def stop_scheduler():
         _scheduler = None
 
 
-def _run_with_app(app, fn):
+def _try_acquire_lease(lock_name: str, lease_seconds: int) -> bool:
+    """
+    Win (or renew) the named lease for this worker.
+
+    Returns True if this worker may proceed this tick. Uses a conditional
+    UPDATE first (works whether we already hold it or it's expired), falling
+    back to an INSERT if the row doesn't exist yet — the INSERT's unique
+    primary key means at most one concurrent worker wins a brand-new lock.
+    """
+    now = datetime.utcnow()
+    new_expiry = now + timedelta(seconds=max(lease_seconds, 10))
+
+    matched = EdoWorkerLease.query.filter(
+        EdoWorkerLease.lock_name == lock_name,
+        db.or_(EdoWorkerLease.expires_at < now, EdoWorkerLease.holder == _WORKER_ID),
+    ).update(
+        {"holder": _WORKER_ID, "expires_at": new_expiry, "updated_at": now},
+        synchronize_session=False,
+    )
+    if matched:
+        db.session.commit()
+        return True
+
+    if EdoWorkerLease.query.filter_by(lock_name=lock_name).first() is not None:
+        # Row exists and is currently held by someone else, unexpired.
+        db.session.rollback()
+        return False
+
+    try:
+        db.session.add(EdoWorkerLease(
+            lock_name=lock_name, holder=_WORKER_ID,
+            expires_at=new_expiry, updated_at=now,
+        ))
+        db.session.commit()
+        return True
+    except IntegrityError:
+        # Another worker's INSERT landed first — they're leader this tick.
+        db.session.rollback()
+        return False
+
+
+def _run_with_app(app, fn, lock_name: str, lease_seconds: int):
     with app.app_context():
         try:
+            if not _try_acquire_lease(lock_name, lease_seconds):
+                return
             fn()
         except Exception:
             logger.exception("edo job %s failed", fn.__name__)

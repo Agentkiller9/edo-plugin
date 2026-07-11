@@ -8,6 +8,7 @@
     {{ challenge.difficulty|replace('_', ' ')|title }}
   </span>
   <span class="edo-value">{{ challenge.value }} pts</span>
+  <span id="edo-progress" class="text-muted small"></span>
 </div>
 
 <div id="edo-instance-panel" data-challenge-id="{{ challenge.id }}">
@@ -36,6 +37,7 @@
   const spawn  = panel.querySelector(".edo-spawn");
   const stop   = panel.querySelector(".edo-stop");
   const extend = panel.querySelector(".edo-extend");
+  const progressEl = document.getElementById("edo-progress");
 
   let timer = null;
 
@@ -77,17 +79,31 @@
     timer = setInterval(tick, 1000);
   }
 
+  // CTFd.fetch (not the bare fetch()) auto-attaches the CSRF-Token header
+  // CTFd's global before_request hook requires on every POST/PATCH/DELETE.
   async function refresh() {
-    const res = await fetch("/plugins/edo_plugin/dashboard/data");
+    const res = await CTFd.fetch("/plugins/edo_plugin/dashboard/data");
     if (!res.ok) return render(null);
     const j = await res.json();
     const inst = (j.instances || []).find(i => String(i.challenge_id) === String(chal));
     render(inst || null);
   }
 
+  async function refreshProgress() {
+    const res = await CTFd.fetch(`/plugins/edo_plugin/challenges/${chal}/progress`);
+    if (!res.ok) return;
+    const j = await res.json();
+    if (!j.success || j.flags_total <= 1) {
+      progressEl.textContent = "";  // single-flag challenges don't need this
+      return;
+    }
+    progressEl.textContent =
+      `· ${j.flags_solved}/${j.flags_total} flags captured (${j.percent_earned}%)`;
+  }
+
   spawn.onclick = async () => {
     spawn.disabled = true;
-    const res = await fetch(`/plugins/edo_plugin/challenges/${chal}/instance`, {method: "POST"});
+    const res = await CTFd.fetch(`/plugins/edo_plugin/challenges/${chal}/instance`, {method: "POST"});
     const j = await res.json();
     if (!j.success) alert(j.error + (j.detail ? `: ${j.detail}` : ""));
     spawn.disabled = false;
@@ -96,20 +112,20 @@
   stop.onclick = async () => {
     const inst = await currentInstance();
     if (!inst) return;
-    await fetch(`/plugins/edo_plugin/instances/${inst.id}`, {method: "DELETE"});
+    await CTFd.fetch(`/plugins/edo_plugin/instances/${inst.id}`, {method: "DELETE"});
     refresh();
   };
   extend.onclick = async () => {
     const inst = await currentInstance();
     if (!inst) return;
-    const res = await fetch(`/plugins/edo_plugin/instances/${inst.id}/extend`, {method: "POST"});
+    const res = await CTFd.fetch(`/plugins/edo_plugin/instances/${inst.id}/extend`, {method: "POST"});
     const j = await res.json();
     if (!j.success) alert(j.error);
     refresh();
   };
 
   async function currentInstance() {
-    const res = await fetch("/plugins/edo_plugin/dashboard/data");
+    const res = await CTFd.fetch("/plugins/edo_plugin/dashboard/data");
     const j   = await res.json();
     return (j.instances || []).find(i => String(i.challenge_id) === String(chal));
   }
@@ -118,16 +134,17 @@
     ev.preventDefault();
     fb.textContent = "…";
     const data = Object.fromEntries(new FormData(form).entries());
-    const res  = await fetch(`/plugins/edo_plugin/challenges/${chal}/submit`, {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(data),
+    const res  = await CTFd.fetch(`/plugins/edo_plugin/challenges/${chal}/submit`, {
+      method: "POST", body: JSON.stringify(data),
     });
     if (res.status === 429) { fb.textContent = "Rate limited — slow down."; return; }
     const j = await res.json();
     fb.textContent = j.message || (j.correct ? "Correct" : "Incorrect");
     fb.className = "edo-submit-feedback " + (j.correct ? "text-success" : "text-danger");
+    if (j.correct) refreshProgress();
   });
 
   refresh();
+  refreshProgress();
 })();
 </script>

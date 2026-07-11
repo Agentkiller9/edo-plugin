@@ -26,7 +26,7 @@ from .challenge_type import EdoChallengeType
 from .config import EdoConfig
 from .models import (
     EdoAuditLog, EdoChallenge, EdoFlagSolve, EdoFlagWeight,
-    EdoInstance, EdoPeer, EdoSettings, db,
+    EdoInstance, EdoPeer, EdoSettings, EdoWorkerLease, db,
 )
 from .scheduler import start_scheduler
 
@@ -48,6 +48,7 @@ def load(app):
             EdoPeer.__table__,
             EdoSettings.__table__,
             EdoAuditLog.__table__,
+            EdoWorkerLease.__table__,
         ])
 
     # 2. Register challenge type.
@@ -67,12 +68,10 @@ def load(app):
         _seed_defaults()
 
     # 6. Background workers.
-    #    Guard against gunicorn --preload double-start: only the "master" env
-    #    we detect via WORKER_ID being unset should skip; workers should each
-    #    start their own scheduler and rely on APScheduler's per-process
-    #    coalescing. If your deployment prefers a singleton, gate this on
-    #    os.environ.get("EDO_SCHEDULER_ENABLED") == "1" and set it on ONE
-    #    worker only.
+    #    Every gunicorn worker calls start_scheduler(), so every worker runs
+    #    its own APScheduler instance — but scheduler.py's jobs only do real
+    #    work on the one worker that currently holds the EdoWorkerLease row
+    #    for that job. See scheduler.py's module docstring.
     start_scheduler(app)
 
     logger.info("edo-plugin loaded (daemon=%s)", EdoConfig.DAEMON_SOCKET_PATH)
