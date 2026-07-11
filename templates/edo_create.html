@@ -1,0 +1,96 @@
+{# Rendered inside CTFd's admin "Create challenge" modal for type=edo. #}
+<div class="form-group">
+  <label>Name</label>
+  <input type="text" class="form-control" name="name" required>
+</div>
+<div class="form-group">
+  <label>Category</label>
+  <input type="text" class="form-control" name="category" required>
+</div>
+<div class="form-group">
+  <label>Description</label>
+  <textarea class="form-control" name="description" rows="4"></textarea>
+</div>
+
+<div class="form-group">
+  <label>Difficulty</label>
+  <select class="form-control" name="difficulty">
+    <option value="easy"      style="color:#28a745;">Easy (Green)</option>
+    <option value="medium"    style="color:#ffc107;" selected>Medium (Yellow)</option>
+    <option value="hard"      style="color:#dc3545;">Hard (Red)</option>
+    <option value="very_hard" style="color:#6f42c1;">Very Hard (Purple)</option>
+  </select>
+</div>
+
+<div class="form-group">
+  <label>Scoring Mode</label>
+  <select class="form-control" name="scoring_mode" id="edo-scoring-mode">
+    <option value="static" selected>Static</option>
+    <option value="dynamic">Dynamic (decay)</option>
+  </select>
+</div>
+
+<div class="form-group edo-static-only">
+  <label>Value</label>
+  <input type="number" class="form-control" name="value" value="100">
+</div>
+
+<div class="edo-dynamic-only" style="display:none;">
+  <div class="form-group">
+    <label>Initial value</label>
+    <input type="number" class="form-control" name="initial_value" value="500">
+  </div>
+  <div class="form-group">
+    <label>Minimum value</label>
+    <input type="number" class="form-control" name="minimum_value" value="100">
+  </div>
+  <div class="form-group">
+    <label>Decay (solves before minimum)</label>
+    <input type="number" class="form-control" name="decay" value="25">
+  </div>
+</div>
+
+<hr>
+<h5>Instance (optional)</h5>
+<div class="form-group">
+  <label>Docker image</label>
+  <input type="text" class="form-control" name="docker_image"
+         placeholder="registry.local/chall:latest">
+</div>
+<div class="form-group">
+  <label>Exposed ports (CSV, container-side, e.g. 80/tcp,443/tcp)</label>
+  <input type="text" class="form-control" name="exposed_ports">
+</div>
+<div class="form-row">
+  <div class="form-group col-md-4">
+    <label>CPU limit</label>
+    <input type="number" step="0.1" class="form-control" name="cpu_limit" value="1.0">
+  </div>
+  <div class="form-group col-md-4">
+    <label>Memory (MiB)</label>
+    <input type="number" class="form-control" name="memory_limit_mb" value="512">
+  </div>
+  <div class="form-group col-md-4">
+    <label>PIDs limit</label>
+    <input type="number" class="form-control" name="pids_limit" value="256">
+  </div>
+</div>
+<div class="form-group">
+  <label>TTL override (seconds, blank = use global default)</label>
+  <input type="number" class="form-control" name="ttl_seconds">
+</div>
+
+<script>
+(function () {
+  const mode  = document.getElementById("edo-scoring-mode");
+  const stat  = document.querySelectorAll(".edo-static-only");
+  const dyn   = document.querySelectorAll(".edo-dynamic-only");
+  function toggle() {
+    const isDynamic = mode.value === "dynamic";
+    stat.forEach(el => el.style.display = isDynamic ? "none" : "");
+    dyn.forEach(el => el.style.display  = isDynamic ? "" : "none");
+  }
+  mode.addEventListener("change", toggle);
+  toggle();
+})();
+</script>

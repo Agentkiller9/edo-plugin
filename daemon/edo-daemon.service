@@ -1,0 +1,26 @@
+[Unit]
+Description=edo-daemon (CTFd infra sidecar)
+After=network-online.target docker.service wg-quick@wg0.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+# Read the HMAC key + tuneables from a root-owned drop-in.
+EnvironmentFile=/etc/edo/daemon.env
+ExecStart=/usr/local/bin/edo-daemon.py
+Restart=on-failure
+RestartSec=3
+# Give us just enough — we shell out to iptables/wg/docker so we need
+# NET_ADMIN and the ability to reach /var/run/docker.sock.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/edo /var/lib/edo /etc/wireguard
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

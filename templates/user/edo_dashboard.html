@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="jumbotron">
+  <div class="container">
+    <h1>Your Instances</h1>
+    <p class="lead">
+      Active per-team containers, connection info, and expirations.
+    </p>
+  </div>
+</div>
+
+<div class="container">
+  <div class="row mb-3">
+    <div class="col-md-8">
+      <div id="edo-summary" class="text-muted"></div>
+    </div>
+    <div class="col-md-4 text-right">
+      <a href="/plugins/edo/vpn/config" class="btn btn-primary">
+        Download my WireGuard config
+      </a>
+    </div>
+  </div>
+
+  <div id="edo-instances" class="row"></div>
+  <div id="edo-empty" class="alert alert-info" style="display:none;">
+    No active instances. Spawn one from a challenge card.
+  </div>
+</div>
+
+<script>
+(function () {
+  const grid    = document.getElementById("edo-instances");
+  const empty   = document.getElementById("edo-empty");
+  const summary = document.getElementById("edo-summary");
+
+  function fmt(sec) {
+    sec = Math.max(0, sec | 0);
+    const m = String(Math.floor(sec / 60)).padStart(2, "0");
+    const s = String(sec % 60).padStart(2, "0");
+    return `${m}:${s}`;
+  }
+
+  function card(inst) {
+    return `
+      <div class="col-md-6 mb-3">
+        <div class="card">
+          <div class="card-body">
+            <h5 class="card-title">
+              Challenge #${inst.challenge_id}
+              <span class="badge badge-secondary">${inst.status}</span>
+            </h5>
+            <p class="card-text">
+              <strong>Endpoint:</strong>
+              ${inst.host_ip || "?"}:${(inst.host_ports || "").split(",")[0] || "?"}
+              <br>
+              <strong>Ports:</strong> ${inst.host_ports || "-"}
+              <br>
+              <strong>Expires in:</strong>
+              <span class="edo-countdown" data-remaining="${inst.remaining_seconds}">
+                ${fmt(inst.remaining_seconds)}
+              </span>
+            </p>
+            <button class="btn btn-sm btn-warning edo-extend"
+                    data-id="${inst.id}" ${inst.can_extend ? "" : "disabled"}>
+              Extend +time
+            </button>
+            <button class="btn btn-sm btn-danger edo-teardown" data-id="${inst.id}">
+              Stop
+            </button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  async function refresh() {
+    const res = await fetch("/plugins/edo/dashboard/data");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.success) return;
+
+    summary.textContent =
+      `Max ${data.max_containers} concurrent. ` +
+      `Extend unlocks when under ${data.extend_threshold_seconds}s remaining.`;
+
+    if (data.instances.length === 0) {
+      grid.innerHTML = "";
+      empty.style.display = "";
+    } else {
+      empty.style.display = "none";
+      grid.innerHTML = data.instances.map(card).join("");
+    }
+  }
+
+  // Tick client-side once per second between server refreshes.
+  setInterval(() => {
+    document.querySelectorAll(".edo-countdown").forEach((el) => {
+      let r = parseInt(el.dataset.remaining, 10) - 1;
+      if (r < 0) r = 0;
+      el.dataset.remaining = r;
+      el.textContent = fmt(r);
+    });
+  }, 1000);
+
+  // Full refresh from the server every 10s so we get status changes.
+  setInterval(refresh, 10000);
+  refresh();
+
+  document.addEventListener("click", async (ev) => {
+    const t = ev.target;
+    if (t.classList.contains("edo-teardown")) {
+      if (!confirm("Stop this instance?")) return;
+      await fetch(`/plugins/edo/instances/${t.dataset.id}`, { method: "DELETE" });
+      refresh();
+    }
+    if (t.classList.contains("edo-extend")) {
+      const res = await fetch(
+        `/plugins/edo/instances/${t.dataset.id}/extend`, { method: "POST" });
+      const json = await res.json();
+      if (!json.success) alert(json.error || "Cannot extend yet.");
+      refresh();
+    }
+  });
+})();
+</script>
+{% endblock %}

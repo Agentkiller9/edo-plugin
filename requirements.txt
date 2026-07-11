@@ -1,0 +1,2 @@
+# Runtime deps for the CTFd plugin side. The daemon is stdlib-only.
+apscheduler>=3.10,<4.0

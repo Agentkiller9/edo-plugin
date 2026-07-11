@@ -1,0 +1,35 @@
+/* Difficulty pill colors -- kept in sync with EdoConfig.DIFFICULTIES. */
+.edo-difficulty {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  color: #fff;
+  font-size: 0.85em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.edo-difficulty-easy      { background: #28a745; }
+.edo-difficulty-medium    { background: #ffc107; color: #222; }
+.edo-difficulty-hard      { background: #dc3545; }
+.edo-difficulty-very_hard { background: #6f42c1; }
+
+.edo-meta {
+  margin: 8px 0 12px 0;
+}
+.edo-value {
+  margin-left: 10px;
+  font-weight: 600;
+}
+
+/* Countdown gets a subtle mono treatment so it feels like a timer. */
+.edo-countdown {
+  font-family: ui-monospace, "Menlo", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Challenge card border tint per difficulty -- opt-in via class on <div class="card"> */
+.card.edo-difficulty-easy      { border-left: 4px solid #28a745; }
+.card.edo-difficulty-medium    { border-left: 4px solid #ffc107; }
+.card.edo-difficulty-hard      { border-left: 4px solid #dc3545; }
+.card.edo-difficulty-very_hard { border-left: 4px solid #6f42c1; }

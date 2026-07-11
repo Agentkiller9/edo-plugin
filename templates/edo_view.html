@@ -1,0 +1,124 @@
+{# Public-facing challenge modal for type=edo. #}
+<div class="challenge-desc">
+  {{ challenge.html }}
+</div>
+
+<div class="edo-meta">
+  <span class="edo-difficulty edo-difficulty-{{ challenge.difficulty }}">
+    {{ challenge.difficulty|replace('_', ' ')|title }}
+  </span>
+  <span class="edo-value">{{ challenge.value }} pts</span>
+</div>
+
+<div id="edo-instance-panel" data-challenge-id="{{ challenge.id }}">
+  <div class="edo-instance-status text-muted">Checking instance…</div>
+  <button class="btn btn-primary edo-spawn">Spawn instance</button>
+  <button class="btn btn-danger  edo-stop"  style="display:none;">Stop</button>
+  <button class="btn btn-warning edo-extend" style="display:none;" disabled>Extend</button>
+</div>
+
+<form id="edo-submit-form" data-challenge-id="{{ challenge.id }}">
+  <div class="form-group">
+    <input type="text" name="submission" class="form-control"
+           placeholder="Flag..." autocomplete="off" required>
+  </div>
+  <button class="btn btn-success" type="submit">Submit</button>
+  <span class="edo-submit-feedback text-muted"></span>
+</form>
+
+<script>
+(function () {
+  const panel = document.getElementById("edo-instance-panel");
+  const chal  = panel.dataset.challengeId;
+  const form  = document.getElementById("edo-submit-form");
+  const fb    = form.querySelector(".edo-submit-feedback");
+  const status = panel.querySelector(".edo-instance-status");
+  const spawn  = panel.querySelector(".edo-spawn");
+  const stop   = panel.querySelector(".edo-stop");
+  const extend = panel.querySelector(".edo-extend");
+
+  let timer = null;
+
+  function render(inst) {
+    if (!inst) {
+      status.textContent = "No instance running.";
+      spawn.style.display  = "";
+      stop.style.display   = "none";
+      extend.style.display = "none";
+      if (timer) { clearInterval(timer); timer = null; }
+      return;
+    }
+    spawn.style.display  = "none";
+    stop.style.display   = "";
+    extend.style.display = "";
+    extend.disabled = !inst.can_extend;
+
+    let remaining = inst.remaining_seconds;
+    function tick() {
+      const m = String(Math.floor(remaining / 60)).padStart(2, "0");
+      const s = String(remaining % 60).padStart(2, "0");
+      status.innerHTML =
+        `Endpoint <code>${inst.host_ip || "?"}:${(inst.host_ports || "").split(",")[0] || "?"}</code> · `
+        + `${m}:${s} remaining`;
+      remaining--;
+      if (remaining < 0) refresh();
+    }
+    tick();
+    if (timer) clearInterval(timer);
+    timer = setInterval(tick, 1000);
+  }
+
+  async function refresh() {
+    const res = await fetch("/plugins/edo/dashboard/data");
+    if (!res.ok) return render(null);
+    const j = await res.json();
+    const inst = (j.instances || []).find(i => String(i.challenge_id) === String(chal));
+    render(inst || null);
+  }
+
+  spawn.onclick = async () => {
+    spawn.disabled = true;
+    const res = await fetch(`/plugins/edo/challenges/${chal}/instance`, {method: "POST"});
+    const j = await res.json();
+    if (!j.success) alert(j.error + (j.detail ? `: ${j.detail}` : ""));
+    spawn.disabled = false;
+    refresh();
+  };
+  stop.onclick = async () => {
+    const inst = await currentInstance();
+    if (!inst) return;
+    await fetch(`/plugins/edo/instances/${inst.id}`, {method: "DELETE"});
+    refresh();
+  };
+  extend.onclick = async () => {
+    const inst = await currentInstance();
+    if (!inst) return;
+    const res = await fetch(`/plugins/edo/instances/${inst.id}/extend`, {method: "POST"});
+    const j = await res.json();
+    if (!j.success) alert(j.error);
+    refresh();
+  };
+
+  async function currentInstance() {
+    const res = await fetch("/plugins/edo/dashboard/data");
+    const j   = await res.json();
+    return (j.instances || []).find(i => String(i.challenge_id) === String(chal));
+  }
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    fb.textContent = "…";
+    const data = Object.fromEntries(new FormData(form).entries());
+    const res  = await fetch(`/plugins/edo/challenges/${chal}/submit`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(data),
+    });
+    if (res.status === 429) { fb.textContent = "Rate limited — slow down."; return; }
+    const j = await res.json();
+    fb.textContent = j.message || (j.correct ? "Correct" : "Incorrect");
+    fb.className = "edo-submit-feedback " + (j.correct ? "text-success" : "text-danger");
+  });
+
+  refresh();
+})();
+</script>

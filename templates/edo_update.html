@@ -1,0 +1,170 @@
+{# Rendered inside CTFd's admin "Edit challenge" modal for type=edo. #}
+<div class="form-group">
+  <label>Name</label>
+  <input type="text" class="form-control" name="name" value="{{ challenge.name }}">
+</div>
+<div class="form-group">
+  <label>Category</label>
+  <input type="text" class="form-control" name="category" value="{{ challenge.category }}">
+</div>
+<div class="form-group">
+  <label>Description</label>
+  <textarea class="form-control" name="description" rows="4">{{ challenge.description }}</textarea>
+</div>
+<div class="form-group">
+  <label>State</label>
+  <select class="form-control" name="state">
+    <option value="visible" {% if challenge.state == "visible" %}selected{% endif %}>visible</option>
+    <option value="hidden"  {% if challenge.state == "hidden"  %}selected{% endif %}>hidden</option>
+  </select>
+</div>
+
+<div class="form-group">
+  <label>Difficulty</label>
+  <select class="form-control" name="difficulty">
+    {% for d in ["easy", "medium", "hard", "very_hard"] %}
+      <option value="{{ d }}" {% if challenge.difficulty == d %}selected{% endif %}>{{ d }}</option>
+    {% endfor %}
+  </select>
+</div>
+
+<div class="form-group">
+  <label>Scoring Mode</label>
+  <select class="form-control" name="scoring_mode">
+    <option value="static"  {% if challenge.scoring_mode == "static"  %}selected{% endif %}>Static</option>
+    <option value="dynamic" {% if challenge.scoring_mode == "dynamic" %}selected{% endif %}>Dynamic</option>
+  </select>
+</div>
+<div class="form-row">
+  <div class="form-group col-md-4">
+    <label>Value / Initial</label>
+    <input type="number" class="form-control" name="initial_value" value="{{ challenge.initial_value }}">
+  </div>
+  <div class="form-group col-md-4">
+    <label>Minimum</label>
+    <input type="number" class="form-control" name="minimum_value" value="{{ challenge.minimum_value }}">
+  </div>
+  <div class="form-group col-md-4">
+    <label>Decay</label>
+    <input type="number" class="form-control" name="decay" value="{{ challenge.decay }}">
+  </div>
+</div>
+
+<hr>
+<h5>Instance</h5>
+<div class="form-group">
+  <label>Docker image</label>
+  <input type="text" class="form-control" name="docker_image" value="{{ challenge.docker_image or '' }}">
+</div>
+<div class="form-group">
+  <label>Exposed ports</label>
+  <input type="text" class="form-control" name="exposed_ports" value="{{ challenge.exposed_ports or '' }}">
+</div>
+<div class="form-row">
+  <div class="form-group col-md-4">
+    <label>CPU limit</label>
+    <input type="number" step="0.1" class="form-control" name="cpu_limit" value="{{ challenge.cpu_limit }}">
+  </div>
+  <div class="form-group col-md-4">
+    <label>Memory (MiB)</label>
+    <input type="number" class="form-control" name="memory_limit_mb" value="{{ challenge.memory_limit_mb }}">
+  </div>
+  <div class="form-group col-md-4">
+    <label>PIDs</label>
+    <input type="number" class="form-control" name="pids_limit" value="{{ challenge.pids_limit }}">
+  </div>
+</div>
+<div class="form-group">
+  <label>TTL override (seconds)</label>
+  <input type="number" class="form-control" name="ttl_seconds" value="{{ challenge.ttl_seconds or '' }}">
+</div>
+
+<hr>
+<h5>Flags</h5>
+<div id="edo-flags-editor" data-challenge-id="{{ challenge.id }}">
+  <div id="edo-flags-list"></div>
+  <button type="button" id="edo-add-flag" class="btn btn-sm btn-primary">+ Add flag</button>
+  <div id="edo-flag-warning" class="text-warning small mt-2"></div>
+</div>
+
+<script>
+(function () {
+  const box   = document.getElementById("edo-flags-editor");
+  const list  = document.getElementById("edo-flags-list");
+  const warn  = document.getElementById("edo-flag-warning");
+  const chal  = box.dataset.challengeId;
+
+  function row(f) {
+    return `
+      <div class="form-row align-items-center mb-1" data-flag-id="${f.id}">
+        <div class="col-md-3">
+          <input class="form-control form-control-sm edo-f-label"
+                 placeholder="Label" value="${f.label ?? ""}">
+        </div>
+        <div class="col-md-2">
+          <select class="form-control form-control-sm edo-f-type">
+            <option value="static" ${f.flag_type === "static" ? "selected" : ""}>static</option>
+            <option value="regex"  ${f.flag_type === "regex"  ? "selected" : ""}>regex</option>
+          </select>
+        </div>
+        <div class="col-md-4">
+          <input class="form-control form-control-sm edo-f-content"
+                 placeholder="Flag value" value="${f.content ?? ""}">
+        </div>
+        <div class="col-md-2">
+          <input type="number" min="0" max="100"
+                 class="form-control form-control-sm edo-f-weight"
+                 value="${f.weight}"> %
+        </div>
+        <div class="col-md-1">
+          <button class="btn btn-sm btn-danger edo-f-del">×</button>
+        </div>
+      </div>`;
+  }
+
+  async function load() {
+    const res = await fetch(`/plugins/edo/admin/challenges/${chal}/flags`);
+    const j = await res.json();
+    list.innerHTML = (j.flags || []).map(row).join("");
+    updateWarning(j.flags || []);
+  }
+
+  function updateWarning(flags) {
+    const sum = flags.reduce((a, f) => a + (parseInt(f.weight, 10) || 0), 0);
+    warn.textContent = sum === 100 ? "" : `Weights sum to ${sum}% — must total 100%.`;
+  }
+
+  document.getElementById("edo-add-flag").onclick = async () => {
+    const res = await fetch(`/plugins/edo/admin/challenges/${chal}/flags`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ flag_type: "static", content: "", weight: 0, label: "" }),
+    });
+    if (res.ok) load();
+  };
+
+  list.addEventListener("click", async (ev) => {
+    const del = ev.target.closest(".edo-f-del");
+    if (!del) return;
+    const row = del.closest("[data-flag-id]");
+    await fetch(`/plugins/edo/admin/flags/${row.dataset.flagId}`, { method: "DELETE" });
+    load();
+  });
+
+  list.addEventListener("change", async (ev) => {
+    const row = ev.target.closest("[data-flag-id]");
+    if (!row) return;
+    await fetch(`/plugins/edo/admin/flags/${row.dataset.flagId}`, {
+      method: "PATCH", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        label:     row.querySelector(".edo-f-label").value,
+        flag_type: row.querySelector(".edo-f-type").value,
+        content:   row.querySelector(".edo-f-content").value,
+        weight:    parseInt(row.querySelector(".edo-f-weight").value, 10) || 0,
+      }),
+    });
+    load();
+  });
+
+  load();
+})();
+</script>
