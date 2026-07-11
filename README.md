@@ -83,6 +83,16 @@ container.
 
 ### 1. Daemon (host, root)
 
+Prereqs — the daemon shells out to `wg`, `docker`, and `iptables`:
+
+```bash
+sudo apt update
+sudo apt install -y wireguard-tools docker.io iptables
+```
+
+`wireguard-tools` also creates `/etc/wireguard/` which the systemd unit
+sandboxes into the service's namespace.
+
 ```bash
 # Clone somewhere durable
 sudo mkdir -p /opt/edo && cd /opt/edo
