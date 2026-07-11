@@ -54,11 +54,20 @@
     extend.disabled = !inst.can_extend;
 
     let remaining = inst.remaining_seconds;
+    function firstPort() {
+      try {
+        const obj = JSON.parse(inst.host_ports || "{}");
+        const vals = Object.values(obj);
+        return vals.length ? vals[0] : "?";
+      } catch (e) {
+        return "?";
+      }
+    }
     function tick() {
       const m = String(Math.floor(remaining / 60)).padStart(2, "0");
       const s = String(remaining % 60).padStart(2, "0");
       status.innerHTML =
-        `Endpoint <code>${inst.host_ip || "?"}:${(inst.host_ports || "").split(",")[0] || "?"}</code> · `
+        `Endpoint <code>${inst.assigned_ip || "?"}:${firstPort()}</code> · `
         + `${m}:${s} remaining`;
       remaining--;
       if (remaining < 0) refresh();

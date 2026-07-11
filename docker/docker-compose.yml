@@ -9,10 +9,13 @@
 # We bind-mount the daemon's Unix socket into the CTFd container so the
 # plugin can call it.
 #
+# Authentication is kernel-level (SO_PEERCRED) — the daemon reads the real
+# UID of the connecting process off the socket, so there's no shared secret
+# to configure here. What has to match on both sides is the UID: set
+# EDO_ALLOWED_UID in the host's /etc/edo/daemon.env to whatever `docker
+# compose exec ctfd id -u` prints (1001 for the stock ctfd/ctfd image).
+#
 # Bring-up:
-#   cp .env.example .env
-#   openssl rand -hex 32 > /tmp/key ; then set EDO_DAEMON_HMAC_KEY in .env
-#     AND the same value in /etc/edo/daemon.env on the host
 #   docker compose up -d --build
 
 services:
@@ -32,10 +35,10 @@ services:
       - ACCESS_LOG=-
       - ERROR_LOG=-
       - REVERSE_PROXY=true
-      # EDO: transport to the host daemon. Both values MUST match the daemon's
-      # /etc/edo/daemon.env on the host.
-      - EDO_DAEMON_SOCKET=/run/edo/edo-daemon.sock
-      - EDO_DAEMON_HMAC_KEY=${EDO_DAEMON_HMAC_KEY}
+      # EDO: transport to the host daemon. Path must match EDO_SOCKET_PATH in
+      # the daemon's /etc/edo/daemon.env on the host (both default to
+      # /run/edo/edo.sock, so this is usually a no-op to keep in sync).
+      - EDO_DAEMON_SOCKET=/run/edo/edo.sock
       - EDO_DAEMON_TIMEOUT=30
     volumes:
       - ./.data/CTFd/logs:/var/log/CTFd

@@ -6,7 +6,6 @@ venv/
 *.sock
 state.json
 daemon.env
-docker/.env
 docker/.data/
 .DS_Store
 Thumbs.db

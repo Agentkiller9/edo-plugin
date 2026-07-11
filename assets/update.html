@@ -53,8 +53,8 @@
 <hr>
 <h5>Instance</h5>
 <div class="form-group">
-  <label>Docker image</label>
-  <input type="text" class="form-control" name="docker_image" value="{{ challenge.docker_image or '' }}">
+  <label>Build path (host directory containing a Dockerfile)</label>
+  <input type="text" class="form-control" name="build_path" value="{{ challenge.build_path or '' }}">
 </div>
 <div class="form-group">
   <label>Exposed ports</label>
@@ -74,92 +74,78 @@
     <input type="number" class="form-control" name="pids_limit" value="{{ challenge.pids_limit }}">
   </div>
 </div>
+<div class="form-group form-check">
+  <input type="checkbox" class="form-check-input" name="read_only_rootfs" value="true"
+         {% if challenge.read_only_rootfs %}checked{% endif %}>
+  <label class="form-check-label">Read-only root filesystem (/tmp stays writable)</label>
+</div>
 <div class="form-group">
   <label>TTL override (seconds)</label>
   <input type="number" class="form-control" name="ttl_seconds" value="{{ challenge.ttl_seconds or '' }}">
 </div>
 
 <hr>
-<h5>Flags</h5>
-<div id="edo-flags-editor" data-challenge-id="{{ challenge.id }}">
-  <div id="edo-flags-list"></div>
-  <button type="button" id="edo-add-flag" class="btn btn-sm btn-primary">+ Add flag</button>
+<h5>Flag Weights</h5>
+<p class="text-muted small">
+  Add, edit, and delete flags themselves from the <strong>Flags</strong> tab
+  above (CTFd's native flag editor — static/regex, case sensitivity, all work
+  as normal). This panel only assigns what percentage of the challenge's
+  value each flag is worth.
+</p>
+<div id="edo-weights-editor" data-challenge-id="{{ challenge.id }}">
+  <div id="edo-weights-list"></div>
+  <button type="button" id="edo-weights-refresh" class="btn btn-sm btn-secondary">Refresh</button>
   <div id="edo-flag-warning" class="text-warning small mt-2"></div>
 </div>
 
 <script>
 (function () {
-  const box   = document.getElementById("edo-flags-editor");
-  const list  = document.getElementById("edo-flags-list");
+  const box   = document.getElementById("edo-weights-editor");
+  const list  = document.getElementById("edo-weights-list");
   const warn  = document.getElementById("edo-flag-warning");
   const chal  = box.dataset.challengeId;
 
   function row(f) {
+    const preview = (f.content || "").length > 24 ? f.content.slice(0, 24) + "…" : f.content;
     return `
       <div class="form-row align-items-center mb-1" data-flag-id="${f.id}">
-        <div class="col-md-3">
-          <input class="form-control form-control-sm edo-f-label"
-                 placeholder="Label" value="${f.label ?? ""}">
-        </div>
         <div class="col-md-2">
-          <select class="form-control form-control-sm edo-f-type">
-            <option value="static" ${f.flag_type === "static" ? "selected" : ""}>static</option>
-            <option value="regex"  ${f.flag_type === "regex"  ? "selected" : ""}>regex</option>
-          </select>
+          <span class="badge badge-light">${f.type}</span>
+        </div>
+        <div class="col-md-6">
+          <code>${preview || "(empty)"}</code>
         </div>
         <div class="col-md-4">
-          <input class="form-control form-control-sm edo-f-content"
-                 placeholder="Flag value" value="${f.content ?? ""}">
-        </div>
-        <div class="col-md-2">
           <input type="number" min="0" max="100"
                  class="form-control form-control-sm edo-f-weight"
-                 value="${f.weight}"> %
-        </div>
-        <div class="col-md-1">
-          <button class="btn btn-sm btn-danger edo-f-del">×</button>
+                 value="${f.weight_pct}"> %
         </div>
       </div>`;
   }
 
   async function load() {
-    const res = await fetch(`/plugins/edo_plugin/admin/challenges/${chal}/flags`);
+    const res = await fetch(`/plugins/edo_plugin/admin/challenges/${chal}/flag_weights`);
     const j = await res.json();
-    list.innerHTML = (j.flags || []).map(row).join("");
+    list.innerHTML = (j.flags || []).map(row).join("") ||
+      '<p class="text-muted">No flags yet — add one from the Flags tab first.</p>';
     updateWarning(j.flags || []);
   }
 
   function updateWarning(flags) {
-    const sum = flags.reduce((a, f) => a + (parseInt(f.weight, 10) || 0), 0);
-    warn.textContent = sum === 100 ? "" : `Weights sum to ${sum}% — must total 100%.`;
+    const sum = flags.reduce((a, f) => a + (parseInt(f.weight_pct, 10) || 0), 0);
+    warn.textContent = (flags.length === 0 || sum === 100)
+      ? "" : `Weights sum to ${sum}% — must total 100%.`;
   }
 
-  document.getElementById("edo-add-flag").onclick = async () => {
-    const res = await fetch(`/plugins/edo_plugin/admin/challenges/${chal}/flags`, {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ flag_type: "static", content: "", weight: 0, label: "" }),
-    });
-    if (res.ok) load();
-  };
-
-  list.addEventListener("click", async (ev) => {
-    const del = ev.target.closest(".edo-f-del");
-    if (!del) return;
-    const row = del.closest("[data-flag-id]");
-    await fetch(`/plugins/edo_plugin/admin/flags/${row.dataset.flagId}`, { method: "DELETE" });
-    load();
-  });
+  document.getElementById("edo-weights-refresh").onclick = load;
 
   list.addEventListener("change", async (ev) => {
     const row = ev.target.closest("[data-flag-id]");
     if (!row) return;
-    await fetch(`/plugins/edo_plugin/admin/flags/${row.dataset.flagId}`, {
+    await fetch(`/plugins/edo_plugin/admin/flags/${row.dataset.flagId}/weight`, {
       method: "PATCH", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
-        label:     row.querySelector(".edo-f-label").value,
-        flag_type: row.querySelector(".edo-f-type").value,
-        content:   row.querySelector(".edo-f-content").value,
-        weight:    parseInt(row.querySelector(".edo-f-weight").value, 10) || 0,
+        weight_pct: parseInt(row.querySelector(".edo-f-weight").value, 10) || 0,
       }),
     });
     load();

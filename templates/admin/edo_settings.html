@@ -13,9 +13,9 @@
     <div class="row">
       <div class="col-md-6">
         <h4>Containers</h4>
-        <label>Max concurrent containers per team</label>
-        <input name="max_containers_per_team" type="number" min="1" class="form-control"
-               value="{{ values.max_containers_per_team }}">
+        <label>Max concurrent containers per owner (team, or user if solo mode)</label>
+        <input name="max_containers_per_owner" type="number" min="1" class="form-control"
+               value="{{ values.max_containers_per_owner }}">
         <label>Default container TTL (seconds)</label>
         <input name="container_ttl_seconds" type="number" min="60" class="form-control"
                value="{{ values.container_ttl_seconds }}">
@@ -36,11 +36,14 @@
                value="{{ values.submit_rate_window }}">
 
         <h4 class="mt-4">VPN</h4>
-        <label>Isolation subnet (CIDR)</label>
-        <input name="vpn_subnet" class="form-control" value="{{ values.vpn_subnet }}">
         <label>VPN server public endpoint</label>
         <input name="vpn_server_endpoint" class="form-control"
                value="{{ values.vpn_server_endpoint }}">
+        <small class="form-text text-muted">
+          Subnets (10.8.0.0/24 for peers, 10.9.0.0/16 subdivided per owner
+          for containers) are fixed daemon-side infrastructure, not
+          editable here.
+        </small>
 
         <h4 class="mt-4">Workers</h4>
         <label>TTL sweep interval (seconds)</label>
@@ -55,6 +58,7 @@
       <button type="submit" class="btn btn-primary">Save</button>
       <button type="button" id="edo-health" class="btn btn-secondary">Ping daemon</button>
       <button type="button" id="edo-bulk-wg" class="btn btn-info">Generate all VPN peers</button>
+      <button type="button" id="edo-kill-switch" class="btn btn-danger float-right">Kill switch: stop all containers</button>
     </div>
   </form>
 
@@ -100,12 +104,22 @@
     if (!confirm("Generate WG peers for every user without one?")) return;
     const res = await fetch("/plugins/edo_plugin/admin/wg/bulk_generate", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scope: "users" }),
+      body: JSON.stringify({}),
     });
     const json = await res.json();
     say(json.success
         ? `Created ${json.created}, skipped ${json.skipped}, failed ${json.failed}.`
         : (json.error || "Bulk failed."),
+        json.success);
+  };
+
+  document.getElementById("edo-kill-switch").onclick = async () => {
+    if (!confirm("Stop EVERY tracked container across all challenges and owners? This does not revoke VPN access.")) return;
+    const res = await fetch("/plugins/edo_plugin/admin/kill_switch", { method: "POST" });
+    const json = await res.json();
+    say(json.success
+        ? `Stopped ${json.containers_removed} container(s).`
+        : (json.error || "Kill switch failed."),
         json.success);
   };
 })();

@@ -1,0 +1,5 @@
+# Runtime deps for edo-daemon (root sidecar). Install into the SAME Python
+# interpreter systemd invokes (see edo-daemon.service: ExecStart uses
+# /usr/bin/python3) — a venv won't be visible to a root-owned systemd unit
+# unless you point ExecStart at the venv's interpreter directly.
+docker>=7.0,<8.0

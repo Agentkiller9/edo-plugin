@@ -2,29 +2,30 @@
 edo-plugin configuration.
 
 Values here are compile-time defaults. Runtime-adjustable values live in the
-EdoSettings table and can be edited from the admin UI. Anything sensitive
-(the HMAC key, socket path) is a startup concern and belongs in env vars.
+EdoSettings table and can be edited from the admin UI. The socket path is a
+startup concern and belongs in an env var; there's no shared secret to
+configure anymore — the daemon authenticates callers via SO_PEERCRED (the
+kernel-verified UID of the connecting process), not an application-layer key.
 """
 import os
 
 
 class EdoConfig:
     # ---- Daemon transport ----
-    # Unix socket exposed by edo-daemon running as root.
-    DAEMON_SOCKET_PATH = os.environ.get("EDO_DAEMON_SOCKET", "/run/edo/edo-daemon.sock")
-    # Shared secret used to HMAC-sign every RPC. Rotate by restarting both sides.
-    DAEMON_HMAC_KEY = os.environ.get("EDO_DAEMON_HMAC_KEY", "").encode()
+    # Unix socket exposed by edo-daemon running as root. Must match
+    # EDO_SOCKET_PATH in the daemon's own environment (they're two different
+    # processes/env spaces pointing at the same bind-mounted path).
+    DAEMON_SOCKET_PATH = os.environ.get("EDO_DAEMON_SOCKET", "/run/edo/edo.sock")
     # Per-RPC timeout in seconds. Docker spawns can be slow; keep generous.
     DAEMON_RPC_TIMEOUT = int(os.environ.get("EDO_DAEMON_TIMEOUT", "30"))
 
     # ---- Defaults for EdoSettings on first boot ----
-    DEFAULT_MAX_CONTAINERS_PER_TEAM = 3
+    DEFAULT_MAX_CONTAINERS_PER_OWNER = 3
     DEFAULT_CONTAINER_TTL_SECONDS = 60 * 60           # 1 hour
     DEFAULT_EXTEND_SECONDS = 30 * 60                  # +30 min
     DEFAULT_EXTEND_THRESHOLD_SECONDS = 10 * 60        # button unlocks under 10 min
     DEFAULT_SUBMIT_RATE_LIMIT = 10                    # attempts per window
     DEFAULT_SUBMIT_RATE_WINDOW = 60                   # seconds
-    DEFAULT_VPN_SUBNET = "10.9.0.0/24"
     DEFAULT_VPN_SERVER_ENDPOINT = "vpn.example.com:51820"
     DEFAULT_RECONCILE_INTERVAL_SECONDS = 60
     DEFAULT_TTL_CHECK_INTERVAL_SECONDS = 15

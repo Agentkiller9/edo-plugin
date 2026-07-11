@@ -5,20 +5,25 @@ Two things happen here:
 1. `EdoChallengeType` — the Python class CTFd looks up when the frontend picks
    the 'edo' challenge type. It handles read/create/update/attempt/solve.
 2. Registration of asset paths so CTFd serves our JS/CSS/templates.
+
+Flags are CTFd's own native Flags table — NOT a reimplementation. CTFd's
+admin challenge-edit UI already renders a generic "Flags" tab (add/edit/
+delete, regex vs static, case sensitivity) for every challenge type,
+working purely off challenge_id via /api/v1/flags. Reinventing that would
+throw away flag-type plugins, import/export, and that whole UI for
+nothing. The ONLY new table here is EdoFlagWeight, which attaches a
+percentage-of-value to each native flag — everything else (content,
+type, comparison) goes through CTFd's own get_flag_class().compare().
 """
 from __future__ import annotations
 
-import json
-import re
-from typing import Any
+from typing import Any, Optional
 
-from CTFd.models import Challenges, Solves, db
+from CTFd.models import Challenges, Flags, Solves, db
 from CTFd.plugins.challenges import CHALLENGE_CLASSES, BaseChallenge
-from CTFd.plugins.migrations import upgrade
-from CTFd.utils.modes import get_model
-from CTFd.utils.user import get_current_team, get_current_user
+from CTFd.plugins.flags import get_flag_class
 
-from .models import EdoChallenge, EdoFlag, EdoFlagSolve
+from .models import EdoChallenge, EdoFlagSolve, EdoFlagWeight
 
 
 class EdoChallengeType(BaseChallenge):
@@ -49,9 +54,9 @@ class EdoChallengeType(BaseChallenge):
                 "name", "description", "category", "value",
                 "difficulty", "scoring_mode",
                 "initial_value", "minimum_value", "decay",
-                "docker_image", "exposed_ports",
+                "build_path", "exposed_ports",
                 "cpu_limit", "memory_limit_mb", "pids_limit",
-                "ttl_seconds",
+                "read_only_rootfs", "ttl_seconds",
             }
         })
         db.session.add(challenge)
@@ -60,9 +65,7 @@ class EdoChallengeType(BaseChallenge):
 
     @classmethod
     def read(cls, challenge):
-        # Include current dynamic value so the view template can render decay.
         challenge = EdoChallenge.query.filter_by(id=challenge.id).first()
-        flags = EdoFlag.query.filter_by(challenge_id=challenge.id).all()
         return {
             "id": challenge.id,
             "name": challenge.name,
@@ -83,21 +86,13 @@ class EdoChallengeType(BaseChallenge):
             "initial_value": challenge.initial_value,
             "minimum_value": challenge.minimum_value,
             "decay": challenge.decay,
-            "docker_image": challenge.docker_image,
+            "build_path": challenge.build_path,
             "exposed_ports": challenge.exposed_ports,
             "cpu_limit": challenge.cpu_limit,
             "memory_limit_mb": challenge.memory_limit_mb,
             "pids_limit": challenge.pids_limit,
+            "read_only_rootfs": challenge.read_only_rootfs,
             "ttl_seconds": challenge.ttl_seconds,
-            "flags": [
-                {
-                    "id": f.id,
-                    "label": f.label,
-                    "flag_type": f.flag_type,
-                    "weight": f.weight,
-                }
-                for f in flags
-            ],
         }
 
     @classmethod
@@ -107,9 +102,9 @@ class EdoChallengeType(BaseChallenge):
             "name", "description", "category", "value", "state", "max_attempts",
             "difficulty", "scoring_mode",
             "initial_value", "minimum_value", "decay",
-            "docker_image", "exposed_ports",
+            "build_path", "exposed_ports",
             "cpu_limit", "memory_limit_mb", "pids_limit",
-            "ttl_seconds",
+            "read_only_rootfs", "ttl_seconds",
         }
         for key, val in data.items():
             if key in editable:
@@ -119,7 +114,9 @@ class EdoChallengeType(BaseChallenge):
 
     @classmethod
     def delete(cls, challenge):
-        # Cascade removes EdoFlag / EdoFlagSolve / EdoInstance via FK ON DELETE.
+        # Cascade removes EdoFlagSolve / EdoInstance via FK ON DELETE.
+        # EdoFlagWeight cascades transitively through Flags' own FK to
+        # challenges, since EdoFlagWeight.flag_id -> flags.id ON DELETE CASCADE.
         Challenges.query.filter_by(id=challenge.id).delete()
         db.session.commit()
 
@@ -130,25 +127,24 @@ class EdoChallengeType(BaseChallenge):
         """
         Try to solve one of the challenge's flags.
 
-        Returns (correct, message). CTFd calls this from the /api/v1/challenges/attempt
-        pathway. We don't award points here — CTFd's Solves table does that via
-        the value returned by `read().value`.
+        Returns (correct, message). CTFd calls this from the
+        /api/v1/challenges/attempt pathway. We don't award points here —
+        CTFd's Solves table does that via the value returned by read().value.
         """
         data = request.form or request.get_json() or {}
         submission = (data.get("submission") or "").strip()
         if not submission:
             return False, "Empty submission"
 
-        flags = EdoFlag.query.filter_by(challenge_id=challenge.id).all()
-        for flag in flags:
-            if _flag_matches(flag, submission):
-                return True, f"Correct! ({flag.label or 'flag'})"
+        for flag in Flags.query.filter_by(challenge_id=challenge.id).all():
+            if get_flag_class(flag.type).compare(flag, submission):
+                return True, "Correct"
         return False, "Incorrect"
 
     @classmethod
     def solve(cls, user, team, challenge, request):
         """
-        Called by CTFd once `attempt()` returns True. We record BOTH a CTFd
+        Called by CTFd once `attempt()` returns True. Records BOTH a CTFd
         Solve (so the scoreboard picks it up) and an EdoFlagSolve row (so
         partial credit and multi-flag progress work).
         """
@@ -161,30 +157,29 @@ class EdoChallengeType(BaseChallenge):
             # Bail cleanly rather than double-solving.
             return
 
-        # Idempotency: never record the same (team/user, flag) solve twice.
-        existing_q = EdoFlagSolve.query.filter_by(flag_id=flag.id)
-        if team is not None:
-            existing_q = existing_q.filter_by(team_id=team.id)
-        else:
-            existing_q = existing_q.filter_by(user_id=user.id)
-        if existing_q.first() is not None:
+        owner_type = "team" if team is not None else "user"
+        owner_id = team.id if team is not None else user.id
+
+        # Idempotency: never record the same (owner, flag) solve twice.
+        existing = EdoFlagSolve.query.filter_by(
+            owner_type=owner_type, owner_id=owner_id, flag_id=flag.id
+        ).first()
+        if existing is not None:
             return
 
         db.session.add(EdoFlagSolve(
             challenge_id=challenge.id,
             flag_id=flag.id,
-            team_id=team.id if team else None,
-            user_id=user.id,
+            owner_type=owner_type,
+            owner_id=owner_id,
         ))
 
         # Only insert a CTFd Solve row on the *first* correct flag for this
-        # (principal, challenge). Subsequent flags top up the value the
-        # scoreboard reads via `read().value`.
-        Model = get_model()
-        principal_id = team.id if team else user.id
+        # (owner, challenge). Subsequent flags top up the value the
+        # scoreboard reads via read().value.
         already_solved = Solves.query.filter_by(
             challenge_id=challenge.id,
-            **({"team_id": principal_id} if team else {"user_id": principal_id}),
+            **({"team_id": owner_id} if team else {"user_id": owner_id}),
         ).first()
         if already_solved is None:
             solve = Solves(
@@ -212,23 +207,14 @@ class EdoChallengeType(BaseChallenge):
             base = challenge.value or 0
         else:
             base = _dynamic_value(challenge)
-        # This is the maximum. Per-team achieved value is base * sum(weights of
-        # solved flags) / 100 and is computed at rendering / scoreboard time.
+        # This is the maximum. Per-owner achieved value is base * sum(weights
+        # of solved flags) / 100 and is computed at rendering / scoreboard time.
         return base
 
 
-def _flag_matches(flag: EdoFlag, submission: str) -> bool:
-    if flag.flag_type == "regex":
-        try:
-            return re.match(flag.content, submission) is not None
-        except re.error:
-            return False
-    return submission == flag.content
-
-
-def _first_matching_flag(challenge_id: int, submission: str) -> EdoFlag | None:
-    for f in EdoFlag.query.filter_by(challenge_id=challenge_id).all():
-        if _flag_matches(f, submission):
+def _first_matching_flag(challenge_id: int, submission: str) -> Optional[Flags]:
+    for f in Flags.query.filter_by(challenge_id=challenge_id).all():
+        if get_flag_class(f.type).compare(f, submission):
             return f
     return None
 
@@ -243,3 +229,32 @@ def _dynamic_value(challenge: EdoChallenge) -> int:
         return minimum
     dropped = (initial - minimum) * (solve_count / decay)
     return int(round(initial - dropped))
+
+
+def owner_progress(challenge_id: int, owner_type: str, owner_id: int) -> dict:
+    """
+    Weighted progress for one owner on a multi-flag challenge — the
+    percentage of the challenge's current value they've earned so far, plus
+    which flags are still outstanding. Used by the view template to show
+    "2/3 flags captured" style progress.
+    """
+    flags = Flags.query.filter_by(challenge_id=challenge_id).all()
+    weights = {
+        w.flag_id: w.weight_pct
+        for w in EdoFlagWeight.query.filter(
+            EdoFlagWeight.flag_id.in_([f.id for f in flags])
+        ).all()
+    }
+    solved_flag_ids = {
+        s.flag_id
+        for s in EdoFlagSolve.query.filter_by(
+            challenge_id=challenge_id, owner_type=owner_type, owner_id=owner_id
+        ).all()
+    }
+    total_weight = sum(weights.get(f.id, 100) for f in flags) or 100
+    earned_weight = sum(weights.get(fid, 100) for fid in solved_flag_ids)
+    return {
+        "flags_total": len(flags),
+        "flags_solved": len(solved_flag_ids),
+        "percent_earned": round(100 * earned_weight / total_weight, 1) if total_weight else 0,
+    }

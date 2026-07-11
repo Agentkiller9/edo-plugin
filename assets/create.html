@@ -53,9 +53,13 @@
 <hr>
 <h5>Instance (optional)</h5>
 <div class="form-group">
-  <label>Docker image</label>
-  <input type="text" class="form-control" name="docker_image"
-         placeholder="registry.local/chall:latest">
+  <label>Build path (host directory containing a Dockerfile)</label>
+  <input type="text" class="form-control" name="build_path"
+         placeholder="/opt/edo/challenges/pwn-101">
+  <small class="form-text text-muted">
+    The daemon builds an image from this path per-owner spawn — there's no
+    separate registry push step.
+  </small>
 </div>
 <div class="form-group">
   <label>Exposed ports (CSV, container-side, e.g. 80/tcp,443/tcp)</label>
@@ -74,6 +78,10 @@
     <label>PIDs limit</label>
     <input type="number" class="form-control" name="pids_limit" value="256">
   </div>
+</div>
+<div class="form-group form-check">
+  <input type="checkbox" class="form-check-input" name="read_only_rootfs" value="true">
+  <label class="form-check-label">Read-only root filesystem (/tmp stays writable)</label>
 </div>
 <div class="form-group">
   <label>TTL override (seconds, blank = use global default)</label>

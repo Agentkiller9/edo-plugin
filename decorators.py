@@ -9,8 +9,9 @@ from functools import wraps
 from threading import Lock
 
 from flask import jsonify, request
-from CTFd.models import Teams, Users
-from CTFd.utils.user import get_current_team, get_current_user
+from CTFd.utils.user import get_current_user
+
+from .owner import resolve_owner
 
 # In-process token bucket. This is intentionally simple: CTFd may run under
 # multiple workers, so this is a *soft* limit — the daemon-side rate limit
@@ -56,37 +57,26 @@ def rate_limited(key_fn, limit: int, window: int):
 
 
 def submit_rate_key(_request):
-    """Key flag-submissions by (team-or-user, challenge_id)."""
-    team = get_current_team()
-    user = get_current_user()
-    principal = ("team", team.id) if team else ("user", user.id if user else 0)
-    # challenge_id is in the view kwargs or JSON body depending on route.
+    """Key flag-submissions by (owner, challenge_id)."""
+    owner = resolve_owner() or ("user", 0)
     body = _request.get_json(silent=True) or {}
     chal = body.get("challenge_id") or _request.view_args.get("challenge_id")
-    return principal + ("chal", chal)
+    return owner + ("chal", chal)
 
 
-def team_required(fn):
+def owner_required(fn):
     """
-    Reject unauthenticated calls, and in team-mode, calls without a team.
+    Reject unauthenticated calls, and in team-mode, calls from a user who
+    hasn't joined/created a team yet.
 
-    Anything that spawns containers or issues VPN configs must resolve to a
-    team so the isolation subnet lookup works.
+    Anything that spawns containers or issues VPN configs must resolve to
+    an owner so the isolation subnet lookup works.
     """
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        user = get_current_user()
-        if user is None:
+        if get_current_user() is None:
             return jsonify(success=False, error="not_authenticated"), 401
-        from CTFd.utils import get_config
-        if get_config("user_mode") == "teams" and get_current_team() is None:
+        if resolve_owner() is None:
             return jsonify(success=False, error="team_required"), 400
         return fn(*args, **kwargs)
     return wrapper
-
-
-def get_principal_ids() -> tuple[int, int | None]:
-    """Return (user_id, team_id) for the current requester."""
-    user = get_current_user()
-    team = get_current_team()
-    return user.id, (team.id if team else None)

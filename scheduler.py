@@ -84,7 +84,6 @@ def _run_with_app(app, fn):
 def _client() -> EdoDaemonClient:
     return EdoDaemonClient(
         socket_path=EdoConfig.DAEMON_SOCKET_PATH,
-        hmac_key=EdoConfig.DAEMON_HMAC_KEY,
         timeout=EdoConfig.DAEMON_RPC_TIMEOUT,
     )
 
@@ -107,7 +106,7 @@ def _sweep_expired():
     for inst in expired:
         try:
             if inst.container_id:
-                client.container_teardown(inst.container_id)
+                client.container_release_instance(inst.container_id)
             inst.status = "expired"
             _audit("scheduler", "teardown_expired", inst)
         except DaemonError as e:
@@ -131,7 +130,8 @@ def _reconcile():
     """
     client = _client()
     try:
-        live = {row["container_id"]: row for row in client.container_list()}
+        result = client.container_reconcile()
+        live = {row["container_id"]: row for row in result.get("instances", [])}
     except DaemonError as e:
         logger.warning("reconcile: daemon unreachable: %s", e)
         return
@@ -160,7 +160,7 @@ def _reconcile():
 
     # Note un-tracked live containers (won't kill — could be admin manual).
     for cid, row in live.items():
-        if cid not in tracked_ids and row.get("challenge_id"):
+        if cid not in tracked_ids and row.get("challenge_ref"):
             _audit("reconciler", "untracked_container", None,
                    {"container_id": cid, "raw": row})
 

@@ -2,343 +2,238 @@
 """
 edo-daemon: root-privileged sidecar for the CTFd edo-plugin.
 
-Runs as `root` on the CTF host, listens on a filesystem-permissioned Unix
-socket, and executes the actions the unprivileged CTFd worker can't:
-    - WireGuard peer allocation / revocation
-    - Docker container spawn / teardown into a per-team-isolated bridge
-    - iptables rules enforcing "Team A cannot reach Team B" micro-segmentation
+v2: authenticates callers via SO_PEERCRED (the kernel-verified UID of the
+connecting process) instead of an HMAC secret. The socket's filesystem
+permissions (0660 root:<group>) control who can even attempt to connect;
+SO_PEERCRED then confirms the connecting process really is running as the
+configured CTFd UID — a check an attacker can't forge by stealing an
+application-layer token, because it's enforced by the kernel on the socket
+itself, not by anything either side sends.
 
-This file is a SKELETON. The pure Python bits (framing, HMAC verification,
-dispatch table, config allocator) are implemented; the shell-outs to
-`wg`, `docker`, and `iptables` are stubbed with clearly marked TODOs and
-the exact commands you'd run.
-
-Dependencies: python3-only stdlib. No Flask/FastAPI needed for a JSON RPC
-this small, and it keeps the root process's dependency surface minimal.
+All the actual infrastructure logic (WireGuard, per-owner Docker networks,
+iptables isolation, container lifecycle) lives in edo_core/ — this file is
+just the RPC server and dispatch table.
 """
 from __future__ import annotations
 
-import ipaddress
 import json
 import logging
 import os
 import signal
 import socket
 import struct
-import subprocess
 import sys
 import threading
-import time
-from hmac import compare_digest, new as hmac_new
-from hashlib import sha256
 from pathlib import Path
+from typing import Any, Callable
 
-# ---------- Config (env-driven) ----------
-
-SOCKET_PATH = os.environ.get("EDO_DAEMON_SOCKET", "/run/edo/edo-daemon.sock")
-HMAC_KEY    = os.environ.get("EDO_DAEMON_HMAC_KEY", "").encode()
-STATE_FILE  = Path(os.environ.get("EDO_DAEMON_STATE", "/var/lib/edo/state.json"))
-VPN_SUBNET  = os.environ.get("EDO_VPN_SUBNET", "10.9.0.0/24")
-VPN_ENDPOINT = os.environ.get("EDO_VPN_ENDPOINT", "vpn.example.com:51820")
-WG_INTERFACE = os.environ.get("EDO_WG_INTERFACE", "wg0")
-DOCKER_NETWORK_PREFIX = os.environ.get("EDO_DOCKER_NET", "edo_team_")
-
-# The socket is chmod 0660 and chown root:ctfd so ONLY the CTFd user
-# can talk to us — HMAC is defence-in-depth.
-SOCKET_MODE  = 0o660
-SOCKET_OWNER = os.environ.get("EDO_SOCKET_OWNER", "root:ctfd")
-
-MAX_REPLAY_WINDOW = 30  # seconds — reject requests whose ts is too old
+from edo_core import containers, wireguard
+from edo_core.db import DatabaseManager
+from edo_core.network import apply_firewall, remove_firewall
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("edo-daemon")
 
+# ---------- Config (env-driven) ----------
+SOCKET_PATH = os.environ.get("EDO_SOCKET_PATH", "/run/edo/edo.sock")
+STATE_DB = Path(os.environ.get("EDO_STATE_DB", "/var/lib/edo/edo-daemon.db"))
+SOCKET_OWNER = os.environ.get("EDO_SOCKET_OWNER", "root:ctfd")
+SOCKET_MODE = 0o660
 
-# ---------- Persistent state ----------
-# Minimal on-disk state so we survive restarts. For real deployments swap
-# for SQLite. We hold the write lock while mutating.
+# The UID the CTFd process runs as. This is the actual auth boundary — a
+# connection from any other non-root UID is rejected outright.
+ALLOWED_UID = os.environ.get("EDO_ALLOWED_UID")
 
-_state_lock = threading.Lock()
+VPN_ENDPOINT = os.environ.get("EDO_VPN_ENDPOINT", "vpn.example.com:51820")
+VPN_PORT = int(os.environ.get("EDO_VPN_PORT", "51820"))
 
-def _load_state() -> dict:
-    if not STATE_FILE.exists():
-        return {"wg_peers": {}, "containers": {}, "team_bridges": {}}
+# Cap on concurrent `docker build` / container-create operations so a burst
+# of simultaneous "spawn" clicks doesn't fork off dozens of builds at once.
+_SPAWN_SEMAPHORE = threading.Semaphore(int(os.environ.get("EDO_MAX_CONCURRENT_SPAWNS", "4")))
+
+db: DatabaseManager  # set in main()
+
+
+# ---------- SO_PEERCRED auth ----------
+def _peer_credentials(conn: socket.socket) -> tuple[int, int, int]:
+    so_peercred = getattr(socket, "SO_PEERCRED", 17)  # 17 is the Linux constant
+    creds = conn.getsockopt(socket.SOL_SOCKET, so_peercred, struct.calcsize("3i"))
+    pid, uid, gid = struct.unpack("3i", creds)
+    return pid, uid, gid
+
+
+def _authorized(uid: int) -> bool:
+    if uid == 0:
+        return True  # root (e.g. an operator debugging via socat) is always trusted
+    return ALLOWED_UID is not None and uid == int(ALLOWED_UID)
+
+
+# ---------- Firewall rebuild helper ----------
+def _rebuild_firewall() -> None:
+    peers_by_owner = db.peers_grouped_by_owner()
+    octets_by_owner = {
+        (o.owner_type, o.owner_id): o.octet for o in db.get_all_owner_octets()
+    }
     try:
-        return json.loads(STATE_FILE.read_text())
-    except json.JSONDecodeError:
-        log.exception("state file corrupt, starting fresh")
-        return {"wg_peers": {}, "containers": {}, "team_bridges": {}}
-
-def _save_state(state: dict) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
-    tmp.replace(STATE_FILE)
+        apply_firewall(peers_by_owner, octets_by_owner, wg_port=VPN_PORT)
+    except RuntimeError:
+        log.exception("firewall rebuild failed")
+        raise
 
 
-# ---------- WireGuard ----------
-
-def _next_free_ip(state: dict) -> str:
-    """Allocate the next unused address inside VPN_SUBNET."""
-    net = ipaddress.ip_network(VPN_SUBNET)
-    used = {p["assigned_ip"] for p in state["wg_peers"].values()}
-    # .1 reserved for server; skip network + broadcast.
-    for host in net.hosts():
-        h = str(host)
-        if h == str(next(net.hosts())):  # server IP
-            continue
-        if h not in used:
-            return h
-    raise RuntimeError("VPN subnet exhausted")
+# ---------- Command handlers ----------
+def handle_ping(_params: dict) -> dict:
+    return {"pong": True}
 
 
-def _wg_generate_keypair() -> tuple[str, str]:
-    """
-    Generate a WireGuard keypair using the wg tool.
-
-    TODO: swap for the `nacl` bindings if you don't want to shell out.
-    """
-    priv = subprocess.check_output(["wg", "genkey"]).decode().strip()
-    pub  = subprocess.check_output(["wg", "pubkey"], input=priv.encode()).decode().strip()
-    return priv, pub
-
-
-def _wg_server_pubkey() -> str:
-    """
-    Read the server's public key. Cached in state; regenerate if missing.
-    """
-    # Convention: server private is at /etc/wireguard/{iface}.key
-    priv_path = Path(f"/etc/wireguard/{WG_INTERFACE}.key")
-    priv = priv_path.read_text().strip()
-    return subprocess.check_output(["wg", "pubkey"], input=priv.encode()).decode().strip()
-
-
-def handle_wg_generate_peer(params: dict) -> dict:
+def handle_wg_ensure_peer(params: dict) -> dict:
     user_id = int(params["user_id"])
-    team_id = params.get("team_id")
+    owner_type = params["owner_type"]
+    owner_id = int(params["owner_id"])
+    username = f"user_{user_id}"
 
-    with _state_lock:
-        state = _load_state()
-        # Idempotent: return the existing peer if user already has one.
-        for peer in state["wg_peers"].values():
-            if peer["user_id"] == user_id and not peer.get("revoked"):
-                return peer
-
-        priv, pub = _wg_generate_keypair()
-        ip = _next_free_ip(state)
-
-        peer = {
-            "user_id":     user_id,
-            "team_id":     team_id,
-            "public_key":  pub,
-            "private_key": priv,   # stored so plugin can re-render config
-            "assigned_ip": ip,
-            "created_at":  int(time.time()),
-            "revoked":     False,
-        }
-        state["wg_peers"][pub] = peer
-        _save_state(state)
-
-    # TODO: add peer live via `wg set` so it works without wg-quick reload.
-    # allowed = f"{ip}/32"
-    # subprocess.check_call([
-    #     "wg", "set", WG_INTERFACE,
-    #     "peer", pub, "allowed-ips", allowed,
-    # ])
-
-    peer_out = dict(peer)
-    peer_out["server_public_key"] = _wg_server_pubkey()
-    peer_out["endpoint"]     = VPN_ENDPOINT
-    peer_out["allowed_ips"]  = VPN_SUBNET
-    peer_out["dns"]          = "10.9.0.1"
-    return peer_out
-
-
-def handle_wg_revoke_peer(params: dict) -> dict:
-    pub = params["public_key"]
-    with _state_lock:
-        state = _load_state()
-        peer = state["wg_peers"].get(pub)
-        if not peer:
-            raise KeyError("unknown peer")
-        peer["revoked"] = True
-        _save_state(state)
-    # TODO: subprocess.check_call(["wg", "set", WG_INTERFACE, "peer", pub, "remove"])
-    return {"revoked": pub}
-
-
-def handle_wg_render_config(params: dict) -> str:
-    peer = params["peer"]
-    server_pub = _wg_server_pubkey()
-    ip = peer["assigned_ip"]
-    return (
-        "[Interface]\n"
-        f"PrivateKey = {peer['private_key']}\n"
-        f"Address    = {ip}/32\n"
-        "DNS        = 10.9.0.1\n\n"
-        "[Peer]\n"
-        f"PublicKey  = {server_pub}\n"
-        f"Endpoint   = {VPN_ENDPOINT}\n"
-        f"AllowedIPs = {VPN_SUBNET}\n"
-        "PersistentKeepalive = 25\n"
-    )
-
-
-# ---------- Docker + iptables ----------
-
-def _ensure_team_bridge(team_id: int | None) -> str:
-    """
-    Create a Docker bridge dedicated to a team if one doesn't exist yet.
-
-    The team subnet is derived deterministically from team_id so restarts
-    yield the same layout. Returns the bridge name.
-    """
-    if team_id is None:
-        return "bridge"  # solo/user mode falls back to default
-    name = f"{DOCKER_NETWORK_PREFIX}{team_id}"
-    with _state_lock:
-        state = _load_state()
-        if name in state["team_bridges"]:
-            return name
-        # /28 per team gives 14 usable addresses — enough for a handful of
-        # simultaneous containers per team. Adjust to taste.
-        base = ipaddress.ip_network("172.30.0.0/16")
-        subnet = list(base.subnets(new_prefix=28))[team_id % 4096]
-        state["team_bridges"][name] = str(subnet)
-        _save_state(state)
-
-    # TODO: create the docker network + iptables isolation:
-    # subprocess.check_call([
-    #     "docker", "network", "create",
-    #     "--driver", "bridge",
-    #     "--subnet", str(subnet),
-    #     "--opt", "com.docker.network.bridge.enable_icc=true",
-    #     name,
-    # ])
-    # _install_isolation_rules(name, str(subnet))
-    return name
-
-
-def _install_isolation_rules(bridge: str, subnet: str) -> None:
-    """
-    Enforce: containers in `bridge` can reach the internet and the VPN
-    subnet, but CANNOT reach any other edo_team_* subnet.
-
-    We chain-scope our rules under EDO_TEAM_ISOLATION so we can flush
-    without touching operator rules.
-
-    TODO: implement — this is the sketch:
-        iptables -N EDO_TEAM_ISOLATION 2>/dev/null || true
-        iptables -I FORWARD -j EDO_TEAM_ISOLATION
-        iptables -A EDO_TEAM_ISOLATION -s <subnet> -d 172.30.0.0/16 -j DROP
-        iptables -A EDO_TEAM_ISOLATION -s 172.30.0.0/16 -d <subnet> -j DROP
-        # Allow VPN -> this team's containers (participants reach their box):
-        iptables -A EDO_TEAM_ISOLATION -s <vpn_subnet> -d <subnet> -j ACCEPT
-    """
-    pass
-
-
-def handle_container_spawn(params: dict) -> dict:
-    challenge_id  = params["challenge_id"]
-    team_id       = params.get("team_id")
-    user_id       = params.get("user_id")
-    image         = params["image"]
-    exposed_ports = params.get("exposed_ports") or []
-    cpu_limit     = float(params.get("cpu_limit") or 1.0)
-    memory_mb     = int(params.get("memory_mb") or 512)
-    pids_limit    = int(params.get("pids_limit") or 256)
-    ttl_seconds   = int(params.get("ttl_seconds") or 3600)
-
-    network = _ensure_team_bridge(team_id)
-    name = f"edo_c{challenge_id}_t{team_id or 'u'}_{user_id or 'x'}_{int(time.time())}"
-
-    # TODO: actually run docker. Sketch:
-    # cmd = [
-    #     "docker", "run", "-d", "--rm",
-    #     "--name", name,
-    #     "--network", network,
-    #     "--cpus", str(cpu_limit),
-    #     "--memory", f"{memory_mb}m",
-    #     "--pids-limit", str(pids_limit),
-    #     "--cap-drop", "ALL",
-    #     "--security-opt", "no-new-privileges:true",
-    #     "--read-only",
-    # ]
-    # for p in exposed_ports:
-    #     cmd += ["-p", p]
-    # cmd += [image]
-    # container_id = subprocess.check_output(cmd).decode().strip()
-    # meta = subprocess.check_output([
-    #     "docker", "inspect", container_id,
-    #     "--format", "{{json .NetworkSettings}}"
-    # ])
-    container_id = f"stub_{name}"
-    host_ip = "10.9.0.1"
-    host_ports = ",".join(exposed_ports) if exposed_ports else ""
-
-    with _state_lock:
-        state = _load_state()
-        state["containers"][container_id] = {
-            "container_id": container_id,
-            "container_name": name,
-            "challenge_id": challenge_id,
-            "team_id": team_id,
-            "user_id": user_id,
-            "status": "running",
-            "host_ip": host_ip,
-            "host_ports": host_ports,
-            "expires_at": int(time.time()) + ttl_seconds,
-        }
-        _save_state(state)
+    existing = db.get_peer(username)
+    if existing is None:
+        server = wireguard.load_server_config(VPN_ENDPOINT, VPN_PORT)
+        client_cfg = wireguard.add_peer(
+            db, owner_type=owner_type, owner_id=owner_id, username=username, server=server,
+        )
+        _rebuild_firewall()
+        peer = client_cfg.peer
+    else:
+        peer = existing
+        server = wireguard.load_server_config(VPN_ENDPOINT, VPN_PORT)
 
     return {
-        "container_id": container_id,
-        "container_name": name,
-        "host_ip": host_ip,
-        "host_ports": host_ports,
+        "username": peer.username,
+        "public_key": peer.public_key,
+        "private_key": peer.private_key,
+        "assigned_ip": peer.ip_address,
+        "server_public_key": server.public_key,
+        "endpoint": server.endpoint,
+        "listen_port": server.listen_port,
     }
 
 
-def handle_container_teardown(params: dict) -> dict:
-    cid = params["container_id"]
-    # TODO: subprocess.call(["docker", "rm", "-f", cid])
-    with _state_lock:
-        state = _load_state()
-        state["containers"].pop(cid, None)
-        _save_state(state)
-    return {"container_id": cid, "removed": True}
+def handle_wg_remove_peer(params: dict) -> dict:
+    user_id = int(params["user_id"])
+    username = f"user_{user_id}"
+    removed = wireguard.remove_peer(db, username)
+    if removed:
+        _rebuild_firewall()
+    return {"removed": removed}
 
 
-def handle_container_list(_params: dict) -> list[dict]:
-    # TODO: cross-check with `docker ps` and reconcile.
-    state = _load_state()
-    return list(state["containers"].values())
+def handle_wg_render_config(params: dict) -> str:
+    user_id = int(params["user_id"])
+    username = f"user_{user_id}"
+    peer = db.get_peer(username)
+    if peer is None:
+        raise KeyError(f"no peer for user {user_id}")
+    server = wireguard.load_server_config(VPN_ENDPOINT, VPN_PORT)
+    return wireguard.render_client_config(peer, server)
+
+
+def handle_container_ensure_instance(params: dict) -> dict:
+    sec = params.get("security") or {}
+    from edo_core.containers import SecurityProfile
+
+    profile = SecurityProfile(
+        no_new_privileges=sec.get("no_new_privileges", True),
+        cap_drop=sec.get("cap_drop", ["NET_RAW"]),
+        cap_add=sec.get("cap_add", []),
+        read_only_rootfs=sec.get("read_only_rootfs", False),
+        memory=sec.get("memory"),
+        cpus=sec.get("cpus"),
+        pids_limit=sec.get("pids_limit"),
+        restart_policy=sec.get("restart_policy", "unless-stopped"),
+    )
+    with _SPAWN_SEMAPHORE:
+        result = containers.spawn_instance(
+            db,
+            owner_type=params["owner_type"],
+            owner_id=int(params["owner_id"]),
+            challenge_ref=str(params["challenge_ref"]),
+            build_path=Path(params["build_path"]),
+            ports=params.get("ports"),
+            security=profile,
+            ttl_seconds=params.get("ttl_seconds"),
+        )
+    if not result.success:
+        raise RuntimeError(result.error or "spawn failed")
+    _rebuild_firewall()
+    inst = result.instance
+    return {
+        "container_id": inst.container_id,
+        "container_name": inst.container_name,
+        "assigned_ip": inst.assigned_ip,
+        "ports": json.loads(inst.ports) if inst.ports else {},
+        "expires_at": inst.expires_at,
+        "status": inst.status,
+    }
+
+
+def handle_container_release_instance(params: dict) -> dict:
+    container_id = params["container_id"]
+    removed = containers.release_instance(db, container_id)
+    _rebuild_firewall()
+    return {"removed": removed}
+
+
+def handle_container_reconcile(_params: dict) -> dict:
+    pruned = containers.reconcile(db)
+    instances = [
+        {
+            "container_id": i.container_id, "container_name": i.container_name,
+            "owner_type": i.owner_type, "owner_id": i.owner_id,
+            "challenge_ref": i.challenge_ref, "assigned_ip": i.assigned_ip,
+            "ports": json.loads(i.ports) if i.ports else {},
+            "status": i.status, "expires_at": i.expires_at,
+        }
+        for i in db.get_all_instances()
+    ]
+    return {"pruned": pruned, "instances": instances}
 
 
 def handle_container_inspect(params: dict) -> dict:
-    state = _load_state()
-    row = state["containers"].get(params["container_id"])
-    if not row:
-        raise KeyError("unknown container")
-    return row
+    container_id = params["container_id"]
+    for i in db.get_all_instances():
+        if i.container_id == container_id:
+            return {
+                "container_id": i.container_id, "container_name": i.container_name,
+                "owner_type": i.owner_type, "owner_id": i.owner_id,
+                "challenge_ref": i.challenge_ref, "assigned_ip": i.assigned_ip,
+                "ports": json.loads(i.ports) if i.ports else {},
+                "status": i.status, "expires_at": i.expires_at,
+            }
+    raise KeyError(f"unknown container {container_id}")
 
 
-# ---------- Dispatch ----------
+def handle_kill_switch(_params: dict) -> dict:
+    """Emergency stop: tears down every tracked container. Deliberately
+    leaves WireGuard peers intact — this is a container kill switch, not a
+    VPN lockout; use wg.remove_peer per-peer if you also need to cut
+    network access.
+    """
+    count = containers.teardown_all(db)
+    _rebuild_firewall()
+    return {"containers_removed": count}
 
-METHODS = {
-    "ping":                lambda p: {"pong": int(time.time())},
-    "wg.generate_peer":    handle_wg_generate_peer,
-    "wg.revoke_peer":      handle_wg_revoke_peer,
-    "wg.render_config":    handle_wg_render_config,
-    "container.spawn":     handle_container_spawn,
-    "container.teardown":  handle_container_teardown,
-    "container.list":      handle_container_list,
-    "container.inspect":   handle_container_inspect,
+
+METHODS: dict[str, Callable[[dict], Any]] = {
+    "ping": handle_ping,
+    "wg.ensure_peer": handle_wg_ensure_peer,
+    "wg.remove_peer": handle_wg_remove_peer,
+    "wg.render_config": handle_wg_render_config,
+    "container.ensure_instance": handle_container_ensure_instance,
+    "container.release_instance": handle_container_release_instance,
+    "container.reconcile": handle_container_reconcile,
+    "container.inspect": handle_container_inspect,
+    "kill_switch": handle_kill_switch,
 }
 
 
 # ---------- Wire protocol ----------
-
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
     buf = bytearray()
     while len(buf) < n:
@@ -353,27 +248,25 @@ def _send_framed(sock: socket.socket, payload: bytes) -> None:
     sock.sendall(struct.pack(">I", len(payload)) + payload)
 
 
+def _reply(conn: socket.socket, **kwargs) -> None:
+    _send_framed(conn, json.dumps(kwargs, separators=(",", ":")).encode())
+
+
 def _serve_one(conn: socket.socket) -> None:
     try:
-        header = _recv_exact(conn, 4)
-        (length,) = struct.unpack(">I", header)
-        if length > 1024 * 1024:
-            _reply(conn, ok=False, error="payload too large")
-            return
-        payload = _recv_exact(conn, length)
-        sig = _recv_exact(conn, 64).decode()
-
-        expected = hmac_new(HMAC_KEY, payload, sha256).hexdigest()
-        if not compare_digest(sig, expected):
-            log.warning("HMAC mismatch — rejecting")
+        pid, uid, gid = _peer_credentials(conn)
+        if not _authorized(uid):
+            log.warning("rejected connection from uid=%d pid=%d", uid, pid)
             _reply(conn, ok=False, error="unauthorized")
             return
 
-        req = json.loads(payload)
-        ts = int(req.get("ts") or 0)
-        if abs(time.time() - ts) > MAX_REPLAY_WINDOW:
-            _reply(conn, ok=False, error="stale request")
+        header = _recv_exact(conn, 4)
+        (length,) = struct.unpack(">I", header)
+        if length > 4 * 1024 * 1024:
+            _reply(conn, ok=False, error="payload too large")
             return
+        payload = _recv_exact(conn, length)
+        req = json.loads(payload)
 
         method = req.get("method", "")
         handler = METHODS.get(method)
@@ -387,23 +280,24 @@ def _serve_one(conn: socket.socket) -> None:
         except Exception as e:
             log.exception("handler %s failed", method)
             _reply(conn, ok=False, error=str(e))
-
-    except (ConnectionError, struct.error) as e:
+    except (ConnectionError, struct.error, json.JSONDecodeError) as e:
         log.warning("bad connection: %s", e)
-
-
-def _reply(conn: socket.socket, **kwargs) -> None:
-    _send_framed(conn, json.dumps(kwargs, separators=(",", ":")).encode())
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
 
 
 def _chown_socket(path: str) -> None:
-    """Apply owner + mode from EDO_SOCKET_OWNER (user:group)."""
     try:
         user, group = SOCKET_OWNER.split(":", 1)
     except ValueError:
         log.warning("EDO_SOCKET_OWNER malformed, leaving default perms")
         return
-    import pwd, grp
+    import grp
+    import pwd
+
     uid = pwd.getpwnam(user).pw_uid
     gid = grp.getgrnam(group).gr_gid
     os.chown(path, uid, gid)
@@ -411,9 +305,35 @@ def _chown_socket(path: str) -> None:
 
 
 def main() -> None:
-    if not HMAC_KEY:
-        log.error("EDO_DAEMON_HMAC_KEY is empty — refusing to start")
+    global db
+
+    if not ALLOWED_UID:
+        log.error("EDO_ALLOWED_UID is not set — refusing to start (would authenticate no one)")
         sys.exit(1)
+
+    STATE_DB.parent.mkdir(parents=True, exist_ok=True)
+    db = DatabaseManager(STATE_DB)
+
+    # Bring up WireGuard and reconcile Docker/firewall state before we start
+    # accepting RPCs, so the first request never races a half-initialized
+    # daemon.
+    try:
+        wireguard.init_server(VPN_ENDPOINT, VPN_PORT)
+        wireguard.bring_up()
+    except RuntimeError:
+        log.exception("WireGuard init failed — VPN features will error until fixed")
+
+    try:
+        adopted = containers.adopt_untracked(db)
+        pruned = containers.reconcile(db)
+        log.info("startup reconcile: adopted=%d pruned=%d", adopted, pruned)
+    except RuntimeError:
+        log.exception("container reconcile failed — is Docker running?")
+
+    try:
+        _rebuild_firewall()
+    except RuntimeError:
+        log.exception("initial firewall apply failed")
 
     Path(SOCKET_PATH).parent.mkdir(parents=True, exist_ok=True)
     if os.path.exists(SOCKET_PATH):
@@ -423,14 +343,18 @@ def main() -> None:
     srv.bind(SOCKET_PATH)
     _chown_socket(SOCKET_PATH)
     srv.listen(32)
-    log.info("edo-daemon listening on %s", SOCKET_PATH)
+    log.info("edo-daemon listening on %s (allowed uid=%s)", SOCKET_PATH, ALLOWED_UID)
 
     stopping = threading.Event()
+
     def _stop(_sig, _frm):
         log.info("shutdown signal")
         stopping.set()
-        try: srv.close()
-        except OSError: pass
+        try:
+            srv.close()
+        except OSError:
+            pass
+
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
 
@@ -439,11 +363,12 @@ def main() -> None:
             conn, _ = srv.accept()
         except OSError:
             break
-        # Thread-per-connection is fine at CTF scale (dozens of requests/sec).
         threading.Thread(target=_serve_one, args=(conn,), daemon=True).start()
 
-    try: os.unlink(SOCKET_PATH)
-    except OSError: pass
+    try:
+        os.unlink(SOCKET_PATH)
+    except OSError:
+        pass
     log.info("stopped")
 
 

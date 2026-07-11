@@ -25,8 +25,8 @@ from .api import edo_bp
 from .challenge_type import EdoChallengeType
 from .config import EdoConfig
 from .models import (
-    EdoAuditLog, EdoChallenge, EdoFlag, EdoFlagSolve,
-    EdoInstance, EdoSettings, EdoVPNPeer, db,
+    EdoAuditLog, EdoChallenge, EdoFlagSolve, EdoFlagWeight,
+    EdoInstance, EdoPeer, EdoSettings, db,
 )
 from .scheduler import start_scheduler
 
@@ -42,10 +42,10 @@ def load(app):
     with app.app_context():
         db.metadata.create_all(bind=db.engine, tables=[
             EdoChallenge.__table__,
-            EdoFlag.__table__,
+            EdoFlagWeight.__table__,
             EdoFlagSolve.__table__,
             EdoInstance.__table__,
-            EdoVPNPeer.__table__,
+            EdoPeer.__table__,
             EdoSettings.__table__,
             EdoAuditLog.__table__,
         ])
@@ -80,13 +80,12 @@ def load(app):
 
 def _seed_defaults():
     defaults = {
-        "max_containers_per_team":    EdoConfig.DEFAULT_MAX_CONTAINERS_PER_TEAM,
+        "max_containers_per_owner":   EdoConfig.DEFAULT_MAX_CONTAINERS_PER_OWNER,
         "container_ttl_seconds":      EdoConfig.DEFAULT_CONTAINER_TTL_SECONDS,
         "extend_seconds":             EdoConfig.DEFAULT_EXTEND_SECONDS,
         "extend_threshold_seconds":   EdoConfig.DEFAULT_EXTEND_THRESHOLD_SECONDS,
         "submit_rate_limit":          EdoConfig.DEFAULT_SUBMIT_RATE_LIMIT,
         "submit_rate_window":         EdoConfig.DEFAULT_SUBMIT_RATE_WINDOW,
-        "vpn_subnet":                 EdoConfig.DEFAULT_VPN_SUBNET,
         "vpn_server_endpoint":        EdoConfig.DEFAULT_VPN_SERVER_ENDPOINT,
         "reconcile_interval_seconds": EdoConfig.DEFAULT_RECONCILE_INTERVAL_SECONDS,
         "ttl_check_interval_seconds": EdoConfig.DEFAULT_TTL_CHECK_INTERVAL_SECONDS,

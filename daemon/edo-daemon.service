@@ -7,9 +7,13 @@ Wants=network-online.target
 Type=simple
 User=root
 Group=root
-# Read the HMAC key + tuneables from a root-owned drop-in.
+# Read EDO_ALLOWED_UID + tuneables from a root-owned drop-in.
 EnvironmentFile=/etc/edo/daemon.env
-ExecStart=/usr/local/bin/edo-daemon.py
+# edo_daemon.py imports the edo_core/ package as a sibling directory, so the
+# whole daemon/ folder must be installed together — not just this one file.
+# See README: Installation, section 1.
+WorkingDirectory=/opt/edo/daemon
+ExecStart=/usr/bin/python3 /opt/edo/daemon/edo_daemon.py
 Restart=on-failure
 RestartSec=3
 # Give us just enough — we shell out to iptables/wg/docker so we need

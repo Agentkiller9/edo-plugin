@@ -40,7 +40,17 @@
     return `${m}:${s}`;
   }
 
+  function parsePorts(raw) {
+    try {
+      const obj = JSON.parse(raw || "{}");
+      return Object.entries(obj).map(([k, v]) => `${k} → ${v}`);
+    } catch (e) {
+      return [];
+    }
+  }
+
   function card(inst) {
+    const ports = parsePorts(inst.host_ports);
     return `
       <div class="col-md-6 mb-3">
         <div class="card">
@@ -50,10 +60,9 @@
               <span class="badge badge-secondary">${inst.status}</span>
             </h5>
             <p class="card-text">
-              <strong>Endpoint:</strong>
-              ${inst.host_ip || "?"}:${(inst.host_ports || "").split(",")[0] || "?"}
+              <strong>Address:</strong> ${inst.assigned_ip || "?"}
               <br>
-              <strong>Ports:</strong> ${inst.host_ports || "-"}
+              <strong>Ports:</strong> ${ports.length ? ports.join(", ") : "-"}
               <br>
               <strong>Expires in:</strong>
               <span class="edo-countdown" data-remaining="${inst.remaining_seconds}">

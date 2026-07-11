@@ -5,24 +5,25 @@ Wire format (one call per connection to avoid framing headaches under load):
     request  = 4-byte big-endian length | JSON payload
     response = 4-byte big-endian length | JSON payload
 
-Every request carries an HMAC-SHA256 signature over the JSON payload using a
-shared secret from EDO_DAEMON_HMAC_KEY. This isn't a substitute for socket
-permissions — it's belt-and-braces so a compromised non-root process on the
-box can't forge RPCs even if the socket ends up world-writable by accident.
+There is no application-layer signing here. Authentication is enforced by
+the daemon reading this process's real UID off the socket via SO_PEERCRED —
+a kernel-level check the daemon performs on every accepted connection,
+which is why the socket's filesystem permissions (0660, owned by
+root:<ctfd-group>) matter: they're what lets this process connect at all,
+and SO_PEERCRED is what confirms it really is who the permissions say it is.
+Nothing this client sends could forge that.
 
 Kept intentionally dependency-free (stdlib only) so it can run inside the
-CTFd worker without pulling gRPC/HTTP client libs.
+CTFd worker without pulling extra client libs.
 """
 from __future__ import annotations
 
-import hmac
 import json
 import logging
 import socket
 import struct
 import time
-from hashlib import sha256
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger("edo.daemon_client")
 
@@ -42,26 +43,19 @@ class DaemonUnavailable(DaemonError):
 class EdoDaemonClient:
     """Thin RPC client. Instances are cheap; create per-request or reuse."""
 
-    def __init__(self, socket_path: str, hmac_key: bytes, timeout: int = 30):
+    def __init__(self, socket_path: str, timeout: int = 30):
         self.socket_path = socket_path
-        self._hmac_key = hmac_key
         self.timeout = timeout
 
     # ---------- low-level ----------
 
-    def _call(self, method: str, params: dict[str, Any] | None = None) -> Any:
+    def _call(self, method: str, params: Optional[dict] = None) -> Any:
         payload = json.dumps(
             {"method": method, "params": params or {}, "ts": int(time.time())},
             separators=(",", ":"),
             sort_keys=True,
         ).encode()
-
-        if not self._hmac_key:
-            # Fail closed: an unsigned RPC is a config bug we shouldn't paper over.
-            raise DaemonError("EDO_DAEMON_HMAC_KEY not configured")
-
-        sig = hmac.new(self._hmac_key, payload, sha256).hexdigest()
-        framed = struct.pack(">I", len(payload)) + payload + sig.encode()
+        framed = struct.pack(">I", len(payload)) + payload
 
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
@@ -89,71 +83,79 @@ class EdoDaemonClient:
 
     # ---------- WireGuard ----------
 
-    def wg_generate_peer(self, user_id: int, team_id: int | None) -> dict:
+    def wg_ensure_peer(self, user_id: int, owner_type: str, owner_id: int) -> dict:
         """
-        Ask the daemon to allocate a peer inside the VPN subnet.
+        Idempotently get-or-create a WireGuard peer for this CTFd user.
 
-        Returns: {public_key, private_key, assigned_ip, server_public_key,
-                  endpoint, allowed_ips, dns}
+        Returns: {username, public_key, private_key, assigned_ip,
+                  server_public_key, endpoint, listen_port}
         """
-        return self._call("wg.generate_peer", {"user_id": user_id, "team_id": team_id})
+        return self._call(
+            "wg.ensure_peer",
+            {"user_id": user_id, "owner_type": owner_type, "owner_id": owner_id},
+        )
 
-    def wg_revoke_peer(self, public_key: str) -> dict:
-        return self._call("wg.revoke_peer", {"public_key": public_key})
+    def wg_remove_peer(self, user_id: int) -> dict:
+        return self._call("wg.remove_peer", {"user_id": user_id})
 
-    def wg_render_config(self, peer: dict) -> str:
-        """Ask the daemon for a ready-to-import .conf blob for a peer."""
-        return self._call("wg.render_config", {"peer": peer})
+    def wg_render_config(self, user_id: int) -> str:
+        """Ask the daemon for a ready-to-import .conf blob for this user."""
+        return self._call("wg.render_config", {"user_id": user_id})
 
     # ---------- Containers ----------
 
-    def container_spawn(
+    def container_ensure_instance(
         self,
-        challenge_id: int,
-        team_id: int | None,
-        user_id: int | None,
-        image: str,
-        exposed_ports: list[str],
-        cpu_limit: float,
-        memory_mb: int,
-        pids_limit: int,
-        ttl_seconds: int,
+        owner_type: str,
+        owner_id: int,
+        challenge_ref: str,
+        build_path: str,
+        exposed_ports: Optional[list] = None,
+        security: Optional[dict] = None,
+        ttl_seconds: Optional[int] = None,
     ) -> dict:
         """
-        Spawn one isolated container for (challenge, team).
+        Idempotently spawn (or return the existing) container for
+        (owner_type, owner_id, challenge_ref).
 
-        Returns: {container_id, container_name, host_ip, host_ports}
+        Returns: {container_id, container_name, assigned_ip, ports,
+                  expires_at, status}
         """
         return self._call(
-            "container.spawn",
+            "container.ensure_instance",
             {
-                "challenge_id": challenge_id,
-                "team_id": team_id,
-                "user_id": user_id,
-                "image": image,
-                "exposed_ports": exposed_ports,
-                "cpu_limit": cpu_limit,
-                "memory_mb": memory_mb,
-                "pids_limit": pids_limit,
+                "owner_type": owner_type,
+                "owner_id": owner_id,
+                "challenge_ref": challenge_ref,
+                "build_path": build_path,
+                "ports": exposed_ports or [],
+                "security": security or {},
                 "ttl_seconds": ttl_seconds,
             },
         )
 
-    def container_teardown(self, container_id: str) -> dict:
-        return self._call("container.teardown", {"container_id": container_id})
+    def container_release_instance(self, container_id: str) -> dict:
+        return self._call("container.release_instance", {"container_id": container_id})
 
-    def container_list(self) -> list[dict]:
+    def container_reconcile(self) -> dict:
         """
-        Return every container the daemon believes is alive.
+        Ask the daemon to reconcile its DB against real Docker state and
+        return everything it's currently tracking.
 
-        Used by the reconciler; do not call from user-facing paths.
-        Each row: {container_id, container_name, challenge_id, team_id,
-                   user_id, status, host_ip, host_ports}
+        Returns: {pruned: int, instances: [{container_id, container_name,
+                  owner_type, owner_id, challenge_ref, assigned_ip, ports,
+                  status, expires_at}, ...]}
         """
-        return self._call("container.list", {})
+        return self._call("container.reconcile", {})
 
     def container_inspect(self, container_id: str) -> dict:
         return self._call("container.inspect", {"container_id": container_id})
+
+    # ---------- Emergency ----------
+
+    def kill_switch(self) -> dict:
+        """Tear down every tracked container. Leaves VPN peers intact."""
+        return self._call("kill_switch", {})
 
     # ---------- Health ----------
 

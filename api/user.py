@@ -2,14 +2,13 @@
 Participant-facing routes.
 
 Every mutating route enforces:
-    - authenticated (team_required covers this and team-mode)
-    - global per-team container cap
-    - one-container-per-(challenge, team) uniqueness (DB unique constraint)
+    - authenticated + owner resolvable (owner_required covers both)
+    - global per-owner container cap
+    - one-container-per-(challenge, owner) uniqueness (DB unique constraint)
     - rate limits for flag submission (belt on top of daemon-side belt)
 """
 from __future__ import annotations
 
-import io
 import json
 import logging
 from datetime import datetime, timedelta
@@ -20,19 +19,9 @@ from CTFd.utils.decorators import authed_only
 
 from ..config import EdoConfig
 from ..daemon_client import DaemonError, EdoDaemonClient
-from ..decorators import (
-    get_principal_ids,
-    rate_limited,
-    submit_rate_key,
-    team_required,
-)
-from ..models import (
-    EdoAuditLog,
-    EdoChallenge,
-    EdoInstance,
-    EdoSettings,
-    EdoVPNPeer,
-)
+from ..decorators import owner_required, rate_limited, submit_rate_key
+from ..models import EdoAuditLog, EdoChallenge, EdoInstance, EdoPeer, EdoSettings
+from ..owner import current_user_id, resolve_owner
 
 logger = logging.getLogger("edo.api.user")
 
@@ -42,7 +31,6 @@ user_bp = Blueprint("edo_user", __name__, template_folder="../templates")
 def _client() -> EdoDaemonClient:
     return EdoDaemonClient(
         socket_path=EdoConfig.DAEMON_SOCKET_PATH,
-        hmac_key=EdoConfig.DAEMON_HMAC_KEY,
         timeout=EdoConfig.DAEMON_RPC_TIMEOUT,
     )
 
@@ -61,21 +49,21 @@ def dashboard_page():
 
 @user_bp.route("/dashboard/data", methods=["GET"])
 @authed_only
-@team_required
+@owner_required
 def dashboard_data():
-    user_id, team_id = get_principal_ids()
-    q = EdoInstance.query.filter(EdoInstance.status.in_(("pending", "running")))
-    if team_id is not None:
-        q = q.filter(EdoInstance.team_id == team_id)
-    else:
-        q = q.filter(EdoInstance.user_id == user_id)
-    instances = q.all()
+    owner_type, owner_id = resolve_owner()
+    instances = (
+        EdoInstance.query
+        .filter(EdoInstance.status.in_(("pending", "running")))
+        .filter_by(owner_type=owner_type, owner_id=owner_id)
+        .all()
+    )
 
     extend_threshold = _setting(
         "extend_threshold_seconds", EdoConfig.DEFAULT_EXTEND_THRESHOLD_SECONDS
     )
     max_containers = _setting(
-        "max_containers_per_team", EdoConfig.DEFAULT_MAX_CONTAINERS_PER_TEAM
+        "max_containers_per_owner", EdoConfig.DEFAULT_MAX_CONTAINERS_PER_OWNER
     )
 
     return jsonify(
@@ -90,43 +78,38 @@ def dashboard_data():
 
 @user_bp.route("/challenges/<int:challenge_id>/instance", methods=["POST"])
 @authed_only
-@team_required
+@owner_required
 def spawn_instance(challenge_id: int):
-    user_id, team_id = get_principal_ids()
+    owner_type, owner_id = resolve_owner()
     challenge = EdoChallenge.query.get(challenge_id)
     if challenge is None:
         return jsonify(success=False, error="challenge_not_found"), 404
-    if not challenge.docker_image:
-        return jsonify(success=False, error="challenge_has_no_image"), 400
+    if not challenge.build_path:
+        return jsonify(success=False, error="challenge_has_no_build_path"), 400
 
-    # Enforce cap. Use FOR UPDATE-style: count in a fresh query inside a
-    # transaction so a fast double-click can't punch past the cap. Postgres
-    # will actually serialize this; SQLite is single-writer so it's moot.
+    # Enforce cap. Reserving the EdoInstance row below is what actually
+    # closes the double-click race (DB unique constraint) — this count is
+    # just the friendly "you're at your limit" check.
     max_containers = _setting(
-        "max_containers_per_team", EdoConfig.DEFAULT_MAX_CONTAINERS_PER_TEAM
+        "max_containers_per_owner", EdoConfig.DEFAULT_MAX_CONTAINERS_PER_OWNER
     )
-    active_q = EdoInstance.query.filter(EdoInstance.status.in_(("pending", "running")))
-    if team_id is not None:
-        active_q = active_q.filter(EdoInstance.team_id == team_id)
-    else:
-        active_q = active_q.filter(EdoInstance.user_id == user_id)
-    active_count = active_q.count()
+    active_count = (
+        EdoInstance.query
+        .filter(EdoInstance.status.in_(("pending", "running")))
+        .filter_by(owner_type=owner_type, owner_id=owner_id)
+        .count()
+    )
     if active_count >= max_containers:
-        return jsonify(
-            success=False, error="team_container_limit",
-            limit=max_containers,
-        ), 429
+        return jsonify(success=False, error="owner_container_limit", limit=max_containers), 429
 
-    # Reserve the row first (satisfies the (challenge, team) unique constraint
-    # atomically). If someone else already reserved it we'll bounce.
     ttl = int(challenge.ttl_seconds or _setting(
         "container_ttl_seconds", EdoConfig.DEFAULT_CONTAINER_TTL_SECONDS
     ))
     expires_at = datetime.utcnow() + timedelta(seconds=ttl)
     inst = EdoInstance(
         challenge_id=challenge_id,
-        team_id=team_id,
-        user_id=user_id,
+        owner_type=owner_type,
+        owner_id=owner_id,
         expires_at=expires_at,
         status="pending",
     )
@@ -134,26 +117,27 @@ def spawn_instance(challenge_id: int):
     try:
         db.session.commit()
     except Exception:
-        # IntegrityError from the unique constraint — surface the existing one.
         db.session.rollback()
-        existing = active_q.filter(EdoInstance.challenge_id == challenge_id).first()
+        existing = EdoInstance.query.filter_by(
+            challenge_id=challenge_id, owner_type=owner_type, owner_id=owner_id
+        ).first()
         if existing:
-            return jsonify(
-                success=False, error="already_running", instance_id=existing.id
-            ), 409
+            return jsonify(success=False, error="already_running", instance_id=existing.id), 409
         return jsonify(success=False, error="race_conflict"), 409
 
-    # Ask the daemon to actually spawn it.
     try:
-        result = _client().container_spawn(
-            challenge_id=challenge_id,
-            team_id=team_id,
-            user_id=user_id,
-            image=challenge.docker_image,
+        result = _client().container_ensure_instance(
+            owner_type=owner_type,
+            owner_id=owner_id,
+            challenge_ref=str(challenge_id),
+            build_path=challenge.build_path,
             exposed_ports=(challenge.exposed_ports or "").split(",") if challenge.exposed_ports else [],
-            cpu_limit=float(challenge.cpu_limit or 1.0),
-            memory_mb=int(challenge.memory_limit_mb or 512),
-            pids_limit=int(challenge.pids_limit or 256),
+            security={
+                "cpus": float(challenge.cpu_limit or 1.0),
+                "memory": f"{int(challenge.memory_limit_mb or 512)}m",
+                "pids_limit": int(challenge.pids_limit or 256),
+                "read_only_rootfs": bool(challenge.read_only_rootfs),
+            },
             ttl_seconds=ttl,
         )
     except DaemonError as e:
@@ -165,25 +149,27 @@ def spawn_instance(challenge_id: int):
 
     inst.container_id   = result.get("container_id")
     inst.container_name = result.get("container_name")
-    inst.host_ip        = result.get("host_ip")
-    inst.host_ports     = result.get("host_ports")
-    inst.status         = "running"
+    inst.assigned_ip     = result.get("assigned_ip")
+    inst.host_ports      = json.dumps(result.get("ports") or {})
+    inst.status          = "running"
     _audit("user", "spawn", inst)
     db.session.commit()
 
-    return jsonify(success=True, instance=_serialize_instance(inst))
+    return jsonify(success=True, instance=_serialize_instance(inst, _setting(
+        "extend_threshold_seconds", EdoConfig.DEFAULT_EXTEND_THRESHOLD_SECONDS
+    )))
 
 
 @user_bp.route("/instances/<int:instance_id>", methods=["DELETE"])
 @authed_only
-@team_required
+@owner_required
 def teardown_instance(instance_id: int):
     inst, err = _owned_instance(instance_id)
     if err:
         return err
     try:
         if inst.container_id:
-            _client().container_teardown(inst.container_id)
+            _client().container_release_instance(inst.container_id)
     except DaemonError as e:
         # Best-effort: still mark stopped so it stops counting against quota.
         inst.error_message = f"teardown_failed: {e}"
@@ -195,7 +181,7 @@ def teardown_instance(instance_id: int):
 
 @user_bp.route("/instances/<int:instance_id>/extend", methods=["POST"])
 @authed_only
-@team_required
+@owner_required
 def extend_instance(instance_id: int):
     inst, err = _owned_instance(instance_id)
     if err:
@@ -223,36 +209,36 @@ def extend_instance(instance_id: int):
 
 @user_bp.route("/vpn/config", methods=["GET"])
 @authed_only
+@owner_required
 def download_wg_config():
     """
     Return a WireGuard .conf for the current user. Lazily provisions a peer
-    the first time.
+    the first time. VPN identity is always per-user (even in team mode);
+    owner_type/owner_id just tag which container subnet this peer may reach.
     """
-    user_id, team_id = get_principal_ids()
-    peer_row = EdoVPNPeer.query.filter_by(user_id=user_id, revoked=False).first()
+    user_id = current_user_id()
+    owner_type, owner_id = resolve_owner()
+    peer_row = EdoPeer.query.filter_by(user_id=user_id, revoked=False).first()
     client = _client()
 
     if peer_row is None:
         try:
-            peer = client.wg_generate_peer(user_id=user_id, team_id=team_id)
+            peer = client.wg_ensure_peer(user_id=user_id, owner_type=owner_type, owner_id=owner_id)
         except DaemonError as e:
             return jsonify(success=False, error="daemon_error", detail=str(e)), 502
-        peer_row = EdoVPNPeer(
+        peer_row = EdoPeer(
             user_id=user_id,
-            team_id=team_id,
+            owner_type=owner_type,
+            owner_id=owner_id,
             public_key=peer["public_key"],
-            private_key=peer["private_key"],
+            private_key=peer.get("private_key"),
             assigned_ip=peer["assigned_ip"],
         )
         db.session.add(peer_row)
         db.session.commit()
 
     try:
-        blob = client.wg_render_config({
-            "public_key":  peer_row.public_key,
-            "private_key": peer_row.private_key,
-            "assigned_ip": peer_row.assigned_ip,
-        })
+        blob = client.wg_render_config(user_id)
     except DaemonError as e:
         return jsonify(success=False, error="daemon_error", detail=str(e)), 502
 
@@ -265,7 +251,7 @@ def download_wg_config():
 
 @user_bp.route("/challenges/<int:challenge_id>/submit", methods=["POST"])
 @authed_only
-@team_required
+@owner_required
 @rate_limited(
     submit_rate_key,
     limit=EdoConfig.DEFAULT_SUBMIT_RATE_LIMIT,
@@ -273,12 +259,10 @@ def download_wg_config():
 )
 def submit_flag(challenge_id: int):
     """
-    Thin proxy that hands the submission to CTFd's own /api/v1/challenges/attempt
-    once we've rate-limited it. Keeping the endpoint here means the rate limit
-    lives in *our* code, not CTFd core — and it fires before CTFd's cheaper
-    checks so we don't burn cycles on abusers.
-
-    The real matching happens in EdoChallengeType.attempt(); we defer to it.
+    Thin proxy that hands the submission to EdoChallengeType.attempt/solve
+    once we've rate-limited it. Keeping the endpoint here means the rate
+    limit lives in *our* code, not CTFd core — and it fires before CTFd's
+    cheaper checks so we don't burn cycles on abusers.
     """
     from ..challenge_type import EdoChallengeType
     challenge = EdoChallenge.query.get(challenge_id)
@@ -289,10 +273,10 @@ def submit_flag(challenge_id: int):
     if not correct:
         return jsonify(success=True, correct=False, message=message)
 
-    user_id, team_id = get_principal_ids()
     from CTFd.models import Teams, Users
-    user = Users.query.get(user_id)
-    team = Teams.query.get(team_id) if team_id else None
+    owner_type, owner_id = resolve_owner()
+    user = Users.query.get(current_user_id())
+    team = Teams.query.get(owner_id) if owner_type == "team" else None
     EdoChallengeType.solve(user, team, challenge, request)
     return jsonify(success=True, correct=True, message=message)
 
@@ -300,17 +284,13 @@ def submit_flag(challenge_id: int):
 # ---------- helpers ----------
 
 def _owned_instance(instance_id: int):
-    """Load an instance and verify the caller owns it. Returns (inst, error_response)."""
-    user_id, team_id = get_principal_ids()
+    """Load an instance and verify the caller's owner matches. Returns (inst, error_response)."""
+    owner_type, owner_id = resolve_owner()
     inst = EdoInstance.query.get(instance_id)
     if inst is None:
         return None, (jsonify(success=False, error="not_found"), 404)
-    if team_id is not None:
-        if inst.team_id != team_id:
-            return None, (jsonify(success=False, error="forbidden"), 403)
-    else:
-        if inst.user_id != user_id:
-            return None, (jsonify(success=False, error="forbidden"), 403)
+    if inst.owner_type != owner_type or inst.owner_id != owner_id:
+        return None, (jsonify(success=False, error="forbidden"), 403)
     return inst, None
 
 
@@ -321,7 +301,7 @@ def _serialize_instance(i: EdoInstance, extend_threshold: int) -> dict:
         "id": i.id,
         "challenge_id": i.challenge_id,
         "container_name": i.container_name,
-        "host_ip": i.host_ip,
+        "assigned_ip": i.assigned_ip,
         "host_ports": i.host_ports,
         "status": i.status,
         "expires_at": i.expires_at.isoformat() if i.expires_at else None,
@@ -332,7 +312,7 @@ def _serialize_instance(i: EdoInstance, extend_threshold: int) -> dict:
 
 def _audit(actor: str, event: str, inst: EdoInstance | None, details: dict | None = None):
     db.session.add(EdoAuditLog(
-        actor=f"{actor}:{inst.user_id}" if inst else actor,
+        actor=actor,
         event=event,
         challenge_id=inst.challenge_id if inst else None,
         instance_id=inst.id if inst else None,

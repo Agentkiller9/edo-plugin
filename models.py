@@ -1,16 +1,38 @@
 """
 SQLAlchemy models for edo-plugin.
 
-Design notes:
-- EdoChallenge uses joined-table inheritance from CTFd's `Challenges` so it
-  slots into the existing challenge machinery (submissions, hints, scoreboard).
-- EdoFlag is *separate* from CTFd's built-in Flags table so we can attach a
-  weight per flag. We keep CTFd's Flags empty for our challenge type — all
-  validation goes through our custom challenge class.
-- EdoInstance tracks live containers. It is a soft mirror of daemon state;
-  the reconciler is what keeps it honest.
-- EdoSettings is a tiny key/value store so admins can tune the plugin without
-  editing config.py.
+v2 design notes (see README for the full rationale):
+
+- **Owner model.** CTFd runs in either "users" or "teams" mode. Rather than
+  carrying separate nullable user_id/team_id columns everywhere, every
+  owner-scoped table here uses a generic (owner_type, owner_id) pair —
+  owner_type is "user" or "team", owner_id is that row's id in CTFd's own
+  Users/Teams table. There's deliberately no FK on owner_id (it's
+  polymorphic — it can't point at two different tables at once); resolution
+  happens through owner.py's resolve_owner(), which wraps CTFd's own
+  get_model()/get_current_user()/get_current_team().
+
+- **Flags are CTFd's native Flags table, not a reimplementation.** CTFd
+  already supports multiple Flags rows per challenge and loops over them in
+  attempt() via get_flag_class(flag.type).compare(). Reimplementing that
+  (the v1 EdoFlag model) would have thrown away CTFd's flag-type plugins,
+  the built-in flag editor, and import/export — for nothing. EdoFlagWeight
+  is the ONLY new table on the flags side: one row per native Flag,
+  attaching the percentage of challenge value it's worth.
+
+- **EdoInstance tracks live containers**, one per (challenge, owner) — a
+  soft mirror of the daemon's own SQLite state. The daemon is authoritative
+  for what's actually running; the reconciler is what keeps this table
+  honest (see scheduler.py).
+
+- **No EdoOwnerOctet here.** Per-owner subnet allocation is infrastructure
+  *actual* state, not CTFd *intent* — it lives entirely in the daemon's own
+  SQLite (daemon/edo_core/db.py). The plugin never needs to know an
+  owner's octet; it only ever talks to the daemon in terms of
+  (owner_type, owner_id).
+
+- **EdoSettings** is a tiny key/value store so admins can tune the plugin
+  without editing config.py.
 """
 from datetime import datetime
 
@@ -38,48 +60,54 @@ class EdoChallenge(Challenges):
     decay = db.Column(db.Integer, default=25)  # solves before minimum reached
 
     # --- Container / instance config ---
-    docker_image = db.Column(db.String(256))         # e.g. "registry.local/chall:latest"
+    # Host filesystem path to a directory containing a Dockerfile. The
+    # daemon builds from this path (edo_core.containers.build_image) rather
+    # than pulling a pre-built image — matches how edo's own docker_mgr
+    # works, and means admins don't need a separate registry push step.
+    build_path = db.Column(db.String(512))
     exposed_ports = db.Column(db.String(256))        # CSV: "80/tcp,443/tcp"
     cpu_limit = db.Column(db.Float, default=1.0)     # CPUs (Docker --cpus)
     memory_limit_mb = db.Column(db.Integer, default=512)
     pids_limit = db.Column(db.Integer, default=256)
-    # Per-challenge TTL override; NULL means "use EdoSettings default".
+    read_only_rootfs = db.Column(db.Boolean, default=False, nullable=False)
+    # Per-challenge TTL override, in seconds; NULL means "use EdoSettings default".
     ttl_seconds = db.Column(db.Integer)
 
     def __init__(self, *args, **kwargs):
         super().__init__(**kwargs)
 
 
-class EdoFlag(db.Model):
-    """A flag belonging to an EdoChallenge with a percentage weight of total score."""
+class EdoFlagWeight(db.Model):
+    """Percentage weight for one of CTFd's native Flags rows.
 
-    __tablename__ = "edo_flags"
+    Deliberately NOT a flag reimplementation — content/type/case-sensitivity
+    all stay on CTFd's own Flags model and flag-type plugin system. This
+    table only adds what CTFd doesn't have: how much of the challenge's
+    total value this specific flag is worth.
+    """
+
+    __tablename__ = "edo_flag_weights"
 
     id = db.Column(db.Integer, primary_key=True)
-    challenge_id = db.Column(
-        db.Integer,
-        db.ForeignKey("challenges.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
+    flag_id = db.Column(
+        db.Integer, db.ForeignKey("flags.id", ondelete="CASCADE"), nullable=False, unique=True
     )
-    # Store hash-friendly type: "static" (case-sensitive) or "regex".
-    flag_type = db.Column(db.String(16), default="static", nullable=False)
-    content = db.Column(db.Text, nullable=False)
-    # Weight is a percentage 0-100. Sum across a challenge's flags should be 100
-    # (enforced in the admin API, not the DB — admins can save invalid states
-    # while drafting).
-    weight = db.Column(db.Integer, default=100, nullable=False)
-    label = db.Column(db.String(128))  # display label, e.g. "Root flag"
+    # Percentage 0-100. Sum across a challenge's flags should be 100 —
+    # enforced in the admin API, not the DB (admins can save invalid state
+    # mid-edit).
+    weight_pct = db.Column(db.Integer, default=100, nullable=False)
 
-    challenge = db.relationship("Challenges", foreign_keys="EdoFlag.challenge_id")
+    flag = db.relationship("Flags", foreign_keys="EdoFlagWeight.flag_id")
 
 
 class EdoFlagSolve(db.Model):
     """
-    Per-team record of which flags of a multi-flag challenge have been solved.
+    Per-owner record of which flags of a multi-flag challenge have been
+    solved, keyed generically so this works in both user-mode and team-mode.
 
-    We track solves at flag granularity so partial credit works: a team that
-    finds 2 of 3 flags gets 2/3 of the challenge points.
+    Partial credit: an owner that's found 2 of 3 flags has earned the sum of
+    those 2 flags' EdoFlagWeight.weight_pct, out of the challenge's current
+    value (see challenge_type.py).
     """
 
     __tablename__ = "edo_flag_solves"
@@ -89,26 +117,25 @@ class EdoFlagSolve(db.Model):
         db.Integer, db.ForeignKey("challenges.id", ondelete="CASCADE"), nullable=False, index=True
     )
     flag_id = db.Column(
-        db.Integer, db.ForeignKey("edo_flags.id", ondelete="CASCADE"), nullable=False, index=True
+        db.Integer, db.ForeignKey("flags.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    # Attribution: user or team, matching CTFd's user_mode.
-    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+    owner_type = db.Column(db.String(8), nullable=False)   # "user" | "team"
+    owner_id = db.Column(db.Integer, nullable=False)
     solved_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
-        # Same team can only solve a given flag once.
-        db.UniqueConstraint("team_id", "flag_id", name="uq_edo_flag_solve_team"),
-        db.UniqueConstraint("user_id", "flag_id", name="uq_edo_flag_solve_user"),
+        db.UniqueConstraint(
+            "owner_type", "owner_id", "flag_id", name="uq_edo_flag_solve_owner"
+        ),
     )
 
 
 class EdoInstance(db.Model):
     """
-    One running container for one (challenge, team) pair.
+    One running container for one (challenge, owner) pair.
 
-    Uniqueness constraint enforces the "one dedicated container per challenge
-    per team" rule. The daemon is authoritative for `status`; the plugin
+    Uniqueness constraint enforces "one dedicated container per challenge
+    per owner". The daemon is authoritative for `status`; the plugin
     updates the DB after each RPC and the reconciler heals drift.
     """
 
@@ -118,15 +145,16 @@ class EdoInstance(db.Model):
     challenge_id = db.Column(
         db.Integer, db.ForeignKey("challenges.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    team_id = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="CASCADE"), index=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    owner_type = db.Column(db.String(8), nullable=False)   # "user" | "team"
+    owner_id = db.Column(db.Integer, nullable=False, index=True)
 
     # Daemon-side identifiers. container_id is None until the spawn RPC returns.
     container_id = db.Column(db.String(64), unique=True)
     container_name = db.Column(db.String(128))
-    # Where the participant connects. Populated once the daemon reports back.
-    host_ip = db.Column(db.String(64))
-    host_ports = db.Column(db.String(256))  # CSV: "31337/tcp,8080/tcp"
+    # Where the participant connects (their per-owner subnet address + any
+    # published ports). Populated once the daemon reports back.
+    assigned_ip = db.Column(db.String(64))
+    host_ports = db.Column(db.String(256))  # JSON: {"80/tcp": "31337", ...}
 
     status = db.Column(db.String(24), default="pending", nullable=False)
     # status ∈ {pending, running, expired, stopped, error, orphaned}
@@ -138,30 +166,36 @@ class EdoInstance(db.Model):
 
     __table_args__ = (
         db.UniqueConstraint(
-            "challenge_id", "team_id", name="uq_edo_instance_team_chal"
-        ),
-        db.UniqueConstraint(
-            "challenge_id", "user_id", name="uq_edo_instance_user_chal"
+            "challenge_id", "owner_type", "owner_id", name="uq_edo_instance_owner_chal"
         ),
     )
 
 
-class EdoVPNPeer(db.Model):
-    """A WireGuard peer bound to a user or a team."""
+class EdoPeer(db.Model):
+    """A WireGuard peer for one CTFd user.
 
-    __tablename__ = "edo_vpn_peers"
+    VPN identity is always per-user (never per-team — teammates each keep
+    their own device/config), but owner_type/owner_id record which
+    container-access scope this peer's traffic is allowed into: the user
+    themselves in user-mode, or their team in team-mode. That's the same
+    (owner_type, owner_id) the daemon uses to build its per-owner firewall
+    ACCEPT rules (see daemon/edo_core/network.py).
+    """
+
+    __tablename__ = "edo_peers"
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(
         db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), index=True, unique=True
     )
-    team_id = db.Column(
-        db.Integer, db.ForeignKey("teams.id", ondelete="CASCADE"), index=True
-    )
+    owner_type = db.Column(db.String(8), nullable=False)
+    owner_id = db.Column(db.Integer, nullable=False, index=True)
+
     public_key = db.Column(db.String(64), nullable=False)
     # Private key is stored so the user can re-download their .conf. If your
-    # threat model forbids this, generate client-side and store only the pubkey.
-    private_key = db.Column(db.String(64), nullable=False)
+    # threat model forbids this, switch to client-side key generation (the
+    # daemon already supports it — see wg.ensure_peer's public_key param).
+    private_key = db.Column(db.String(64))
     assigned_ip = db.Column(db.String(64), nullable=False, unique=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     revoked = db.Column(db.Boolean, default=False, nullable=False)
