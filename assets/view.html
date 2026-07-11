@@ -69,7 +69,7 @@
   }
 
   async function refresh() {
-    const res = await fetch("/plugins/edo/dashboard/data");
+    const res = await fetch("/plugins/edo_plugin/dashboard/data");
     if (!res.ok) return render(null);
     const j = await res.json();
     const inst = (j.instances || []).find(i => String(i.challenge_id) === String(chal));
@@ -78,7 +78,7 @@
 
   spawn.onclick = async () => {
     spawn.disabled = true;
-    const res = await fetch(`/plugins/edo/challenges/${chal}/instance`, {method: "POST"});
+    const res = await fetch(`/plugins/edo_plugin/challenges/${chal}/instance`, {method: "POST"});
     const j = await res.json();
     if (!j.success) alert(j.error + (j.detail ? `: ${j.detail}` : ""));
     spawn.disabled = false;
@@ -87,20 +87,20 @@
   stop.onclick = async () => {
     const inst = await currentInstance();
     if (!inst) return;
-    await fetch(`/plugins/edo/instances/${inst.id}`, {method: "DELETE"});
+    await fetch(`/plugins/edo_plugin/instances/${inst.id}`, {method: "DELETE"});
     refresh();
   };
   extend.onclick = async () => {
     const inst = await currentInstance();
     if (!inst) return;
-    const res = await fetch(`/plugins/edo/instances/${inst.id}/extend`, {method: "POST"});
+    const res = await fetch(`/plugins/edo_plugin/instances/${inst.id}/extend`, {method: "POST"});
     const j = await res.json();
     if (!j.success) alert(j.error);
     refresh();
   };
 
   async function currentInstance() {
-    const res = await fetch("/plugins/edo/dashboard/data");
+    const res = await fetch("/plugins/edo_plugin/dashboard/data");
     const j   = await res.json();
     return (j.instances || []).find(i => String(i.challenge_id) === String(chal));
   }
@@ -109,7 +109,7 @@
     ev.preventDefault();
     fb.textContent = "…";
     const data = Object.fromEntries(new FormData(form).entries());
-    const res  = await fetch(`/plugins/edo/challenges/${chal}/submit`, {
+    const res  = await fetch(`/plugins/edo_plugin/challenges/${chal}/submit`, {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify(data),
     });

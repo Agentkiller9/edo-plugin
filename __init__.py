@@ -20,32 +20,46 @@ import os
 
 from CTFd.plugins import register_plugin_assets_directory
 from CTFd.plugins.challenges import CHALLENGE_CLASSES
-from CTFd.plugins.migrations import upgrade
 
 from .api import edo_bp
 from .challenge_type import EdoChallengeType
 from .config import EdoConfig
-from .models import EdoSettings, db
+from .models import (
+    EdoAuditLog, EdoChallenge, EdoFlag, EdoFlagSolve,
+    EdoInstance, EdoSettings, EdoVPNPeer, db,
+)
 from .scheduler import start_scheduler
 
 logger = logging.getLogger("edo")
 
 
 def load(app):
-    plugin_dir = os.path.dirname(__file__)
-
-    # 1. Migrations (creates our tables if not present).
-    upgrade(plugin_name="edo-plugin")
+    # 1. Create our tables. `upgrade(plugin_name=...)` only runs Alembic
+    #    revisions (or db.create_all() on SQLite) — since we're a brand-new
+    #    plugin with no migrations directory, we create our tables directly.
+    #    `create_all` is a no-op for tables that already exist, so it's safe
+    #    to run on every boot.
+    with app.app_context():
+        db.metadata.create_all(bind=db.engine, tables=[
+            EdoChallenge.__table__,
+            EdoFlag.__table__,
+            EdoFlagSolve.__table__,
+            EdoInstance.__table__,
+            EdoVPNPeer.__table__,
+            EdoSettings.__table__,
+            EdoAuditLog.__table__,
+        ])
 
     # 2. Register challenge type.
     CHALLENGE_CLASSES["edo"] = EdoChallengeType
 
-    # 3. Blueprint at /plugins/edo/*
-    app.register_blueprint(edo_bp, url_prefix="/plugins/edo")
+    # 3. Blueprint at /plugins/edo_plugin/* — matches the folder name so all
+    #    URL prefixes stay consistent with CTFd convention.
+    app.register_blueprint(edo_bp, url_prefix="/plugins/edo_plugin")
 
-    # 4. Assets — templates AND static files.
+    # 4. Assets served statically at /plugins/edo_plugin/assets/*.
     register_plugin_assets_directory(
-        app, base_path="/plugins/edo-plugin/assets/"
+        app, base_path="/plugins/edo_plugin/assets/"
     )
 
     # 5. Seed defaults on first boot. Idempotent — never clobbers admin edits.

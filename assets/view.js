@@ -18,7 +18,7 @@ CTFd._internal.challenge.postRender = function () {
 };
 
 CTFd._internal.challenge.submit = function (preview) {
-  // Delegated to our /plugins/edo/challenges/<id>/submit endpoint by view.html
+  // Delegated to our /plugins/edo_plugin/challenges/<id>/submit endpoint by view.html
   // so we get the rate limiter. Return a resolved promise for compatibility.
   return Promise.resolve({ data: { status: "handled_by_edo_plugin" } });
 };

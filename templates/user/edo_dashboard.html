@@ -15,7 +15,7 @@
       <div id="edo-summary" class="text-muted"></div>
     </div>
     <div class="col-md-4 text-right">
-      <a href="/plugins/edo/vpn/config" class="btn btn-primary">
+      <a href="/plugins/edo_plugin/vpn/config" class="btn btn-primary">
         Download my WireGuard config
       </a>
     </div>
@@ -73,7 +73,7 @@
   }
 
   async function refresh() {
-    const res = await fetch("/plugins/edo/dashboard/data");
+    const res = await fetch("/plugins/edo_plugin/dashboard/data");
     if (!res.ok) return;
     const data = await res.json();
     if (!data.success) return;
@@ -109,12 +109,12 @@
     const t = ev.target;
     if (t.classList.contains("edo-teardown")) {
       if (!confirm("Stop this instance?")) return;
-      await fetch(`/plugins/edo/instances/${t.dataset.id}`, { method: "DELETE" });
+      await fetch(`/plugins/edo_plugin/instances/${t.dataset.id}`, { method: "DELETE" });
       refresh();
     }
     if (t.classList.contains("edo-extend")) {
       const res = await fetch(
-        `/plugins/edo/instances/${t.dataset.id}/extend`, { method: "POST" });
+        `/plugins/edo_plugin/instances/${t.dataset.id}/extend`, { method: "POST" });
       const json = await res.json();
       if (!json.success) alert(json.error || "Cannot extend yet.");
       refresh();

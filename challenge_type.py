@@ -25,16 +25,16 @@ class EdoChallengeType(BaseChallenge):
     id = "edo"
     name = "edo"
     templates = {
-        "create": "/plugins/edo-plugin/assets/create.html",
-        "update": "/plugins/edo-plugin/assets/update.html",
-        "view":   "/plugins/edo-plugin/assets/view.html",
+        "create": "/plugins/edo_plugin/assets/create.html",
+        "update": "/plugins/edo_plugin/assets/update.html",
+        "view":   "/plugins/edo_plugin/assets/view.html",
     }
     scripts = {
-        "create": "/plugins/edo-plugin/assets/create.js",
-        "update": "/plugins/edo-plugin/assets/update.js",
-        "view":   "/plugins/edo-plugin/assets/view.js",
+        "create": "/plugins/edo_plugin/assets/create.js",
+        "update": "/plugins/edo_plugin/assets/update.js",
+        "view":   "/plugins/edo_plugin/assets/view.js",
     }
-    route = "/plugins/edo-plugin/assets/"
+    route = "/plugins/edo_plugin/assets/"
     blueprint = None  # blueprint is registered in __init__.py so we don't double-register
     challenge_model = EdoChallenge
 

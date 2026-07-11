@@ -48,24 +48,28 @@ Timestamps rejected outside a 30-second window.
 ## Layout
 
 ```
-edo-plugin/
-├── __init__.py              CTFd load(app) — migrations, blueprint, scheduler
-├── config.py                Env-driven defaults, difficulty tiers
-├── models.py                EdoChallenge, EdoFlag, EdoFlagSolve, EdoInstance,
-│                            EdoVPNPeer, EdoSettings, EdoAuditLog
-├── challenge_type.py        EdoChallengeType — multi-flag, decay, partial credit
-├── daemon_client.py         RPC client (stdlib-only)
-├── scheduler.py             APScheduler jobs: TTL sweep + reconciler
-├── decorators.py            rate_limited, team_required
+edo_plugin/                        (folder name when installed under CTFd/plugins/)
+├── __init__.py                    CTFd load(app) — tables, blueprint, scheduler
+├── config.py                      Env-driven defaults, difficulty tiers
+├── models.py                      EdoChallenge, EdoFlag, EdoFlagSolve,
+│                                  EdoInstance, EdoVPNPeer, EdoSettings, EdoAuditLog
+├── challenge_type.py              EdoChallengeType — multi-flag, decay, partial credit
+├── daemon_client.py               RPC client (stdlib-only)
+├── scheduler.py                   APScheduler jobs: TTL sweep + reconciler
+├── decorators.py                  rate_limited, team_required
 ├── api/
-│   ├── admin.py             /plugins/edo/admin/*   (admins_only)
-│   └── user.py              /plugins/edo/*         (authed_only, team_required)
-├── templates/               admin settings, challenge create/update/view,
-│                            user dashboard
-├── assets/                  CSS, JS shims for CTFd's asset pipeline
-└── daemon/
-    ├── edo_daemon.py        Root sidecar (stdlib-only)
-    ├── edo-daemon.service   systemd unit (hardened caps)
+│   ├── admin.py                   /plugins/edo_plugin/admin/*   (admins_only)
+│   └── user.py                    /plugins/edo_plugin/*         (authed_only, team_required)
+├── assets/                        Served at /plugins/edo_plugin/assets/*
+│   ├── create.html / update.html / view.html    challenge-type modals
+│   ├── create.js  / update.js  / view.js        CTFd asset shims
+│   └── style.css                                difficulty tier colors
+├── templates/                     Jinja templates (server-rendered)
+│   ├── admin/edo_settings.html
+│   └── user/edo_dashboard.html
+└── daemon/                        Ships with the plugin but installed on host,
+    ├── edo_daemon.py              not inside the CTFd container.
+    ├── edo-daemon.service
     └── daemon.env.example
 ```
 
@@ -73,10 +77,13 @@ edo-plugin/
 
 ### 1. Plugin (CTFd side)
 
+The plugin folder must be importable as a Python module — hyphens are illegal
+in module names, so clone with the underscore form as the target directory:
+
 ```bash
 cd /opt/CTFd/CTFd/plugins
-git clone https://github.com/Agentkiller9/edo-plugin.git edo-plugin
-pip install -r edo-plugin/requirements.txt
+git clone https://github.com/Agentkiller9/edo-plugin.git edo_plugin
+pip install -r edo_plugin/requirements.txt
 ```
 
 Set the daemon transport in CTFd's environment:
@@ -107,7 +114,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now edo-daemon.service
 ```
 
-Verify from the admin settings page (`/plugins/edo/admin/settings`) — the
+Verify from the admin settings page (`/plugins/edo_plugin/admin/settings`) — the
 "Ping daemon" button should return OK.
 
 ## Configuration

@@ -123,7 +123,7 @@
   }
 
   async function load() {
-    const res = await fetch(`/plugins/edo/admin/challenges/${chal}/flags`);
+    const res = await fetch(`/plugins/edo_plugin/admin/challenges/${chal}/flags`);
     const j = await res.json();
     list.innerHTML = (j.flags || []).map(row).join("");
     updateWarning(j.flags || []);
@@ -135,7 +135,7 @@
   }
 
   document.getElementById("edo-add-flag").onclick = async () => {
-    const res = await fetch(`/plugins/edo/admin/challenges/${chal}/flags`, {
+    const res = await fetch(`/plugins/edo_plugin/admin/challenges/${chal}/flags`, {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ flag_type: "static", content: "", weight: 0, label: "" }),
     });
@@ -146,14 +146,14 @@
     const del = ev.target.closest(".edo-f-del");
     if (!del) return;
     const row = del.closest("[data-flag-id]");
-    await fetch(`/plugins/edo/admin/flags/${row.dataset.flagId}`, { method: "DELETE" });
+    await fetch(`/plugins/edo_plugin/admin/flags/${row.dataset.flagId}`, { method: "DELETE" });
     load();
   });
 
   list.addEventListener("change", async (ev) => {
     const row = ev.target.closest("[data-flag-id]");
     if (!row) return;
-    await fetch(`/plugins/edo/admin/flags/${row.dataset.flagId}`, {
+    await fetch(`/plugins/edo_plugin/admin/flags/${row.dataset.flagId}`, {
       method: "PATCH", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
         label:     row.querySelector(".edo-f-label").value,
