@@ -1,0 +1,92 @@
+# Full CTFd stack with the edo plugin baked into the CTFd image.
+#
+# This mirrors CTFd's upstream docker-compose.yml so ops muscle memory
+# transfers (service names, volume paths, network layout). The additions
+# for edo are marked with `# EDO:` comments.
+#
+# The edo-daemon does NOT run in Docker — it runs as a root systemd service
+# on the host so it can touch iptables, WireGuard, and the host Docker socket.
+# We bind-mount the daemon's Unix socket into the CTFd container so the
+# plugin can call it.
+#
+# Bring-up:
+#   cp .env.example .env
+#   openssl rand -hex 32 > /tmp/key ; then set EDO_DAEMON_HMAC_KEY in .env
+#     AND the same value in /etc/edo/daemon.env on the host
+#   docker compose up -d --build
+
+services:
+  ctfd:
+    build:
+      context: ..                # repo root — Dockerfile is docker/Dockerfile
+      dockerfile: docker/Dockerfile
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - UPLOAD_FOLDER=/var/uploads
+      - DATABASE_URL=mysql+pymysql://ctfd:ctfd@db/ctfd
+      - REDIS_URL=redis://cache:6379
+      - WORKERS=1
+      - LOG_FOLDER=/var/log/CTFd
+      - ACCESS_LOG=-
+      - ERROR_LOG=-
+      - REVERSE_PROXY=true
+      # EDO: transport to the host daemon. Both values MUST match the daemon's
+      # /etc/edo/daemon.env on the host.
+      - EDO_DAEMON_SOCKET=/run/edo/edo-daemon.sock
+      - EDO_DAEMON_HMAC_KEY=${EDO_DAEMON_HMAC_KEY}
+      - EDO_DAEMON_TIMEOUT=30
+    volumes:
+      - ./.data/CTFd/logs:/var/log/CTFd
+      - ./.data/CTFd/uploads:/var/uploads
+      # EDO: expose the host daemon's socket to the container. The socket must
+      # be chmod 660 owned by root:<gid=1001> on the host so UID 1001 (the
+      # CTFd process inside the container) can read it. See daemon.env:
+      # EDO_SOCKET_OWNER=root:ctfd_socket, and create the group with GID 1001.
+      - /run/edo:/run/edo:rw
+    depends_on:
+      db:
+        condition: service_started
+      cache:
+        condition: service_started
+    networks:
+      - default
+      - internal
+
+  db:
+    image: mariadb:10.11
+    restart: always
+    environment:
+      - MARIADB_ROOT_PASSWORD=ctfd
+      - MARIADB_USER=ctfd
+      - MARIADB_PASSWORD=ctfd
+      - MARIADB_DATABASE=ctfd
+      - MARIADB_AUTO_UPGRADE=1
+    volumes:
+      - ./.data/mysql:/var/lib/mysql
+    networks:
+      - internal
+    # Wait — see CTFd's upstream for connect/read/write timeout tuning if the
+    # scheduler ever falls off the connection pool. Defaults are fine to start.
+    command:
+      [
+        "mysqld",
+        "--character-set-server=utf8mb4",
+        "--collation-server=utf8mb4_unicode_ci",
+        "--wait_timeout=28800",
+        "--log-warnings=0",
+      ]
+
+  cache:
+    image: redis:4
+    restart: always
+    volumes:
+      - ./.data/redis:/data
+    networks:
+      - internal
+
+networks:
+  default:
+  internal:
+    internal: true

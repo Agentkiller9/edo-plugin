@@ -75,47 +75,78 @@ edo_plugin/                        (folder name when installed under CTFd/plugin
 
 ## Installation
 
-### 1. Plugin (CTFd side)
-
 The plugin folder must be importable as a Python module — hyphens are illegal
-in module names, so clone with the underscore form as the target directory:
+in module names, so it must be installed under `CTFd/plugins/edo_plugin/`
+(underscore). The daemon runs on the **host** as `root`; CTFd runs in
+**Docker**. They talk over a Unix socket that's bind-mounted into the
+container.
+
+### 1. Daemon (host, root)
 
 ```bash
-cd /opt/CTFd/CTFd/plugins
-git clone https://github.com/Agentkiller9/edo-plugin.git edo_plugin
-pip install -r edo_plugin/requirements.txt
-```
+# Clone somewhere durable
+sudo mkdir -p /opt/edo && cd /opt/edo
+sudo git clone https://github.com/Agentkiller9/edo-plugin.git .
 
-Set the daemon transport in CTFd's environment:
+sudo install -m 0755 daemon/edo_daemon.py       /usr/local/bin/edo-daemon.py
+sudo install -m 0644 daemon/edo-daemon.service  /etc/systemd/system/
+sudo install -d -m 0755 -o root -g root         /etc/edo /run/edo /var/lib/edo
 
-```bash
-export EDO_DAEMON_SOCKET=/run/edo/edo-daemon.sock
-export EDO_DAEMON_HMAC_KEY=<same-hex-key-as-daemon>
-```
+# Create a group with GID 1001 so the container's ctfd user (UID 1001) can
+# read the socket. Then tell the daemon to chown the socket to it.
+sudo groupadd -g 1001 ctfd_socket
 
-Restart CTFd. The plugin creates its tables on first boot and seeds defaults
-into `EdoSettings`.
-
-### 2. Daemon (host side, root)
-
-```bash
-sudo install -m 0755 edo-plugin/daemon/edo_daemon.py /usr/local/bin/edo-daemon.py
-sudo install -m 0644 edo-plugin/daemon/edo-daemon.service /etc/systemd/system/
-sudo install -d -m 0755 -o root -g root /etc/edo /run/edo /var/lib/edo
-sudo cp edo-plugin/daemon/daemon.env.example /etc/edo/daemon.env
+sudo cp daemon/daemon.env.example /etc/edo/daemon.env
 sudo chmod 600 /etc/edo/daemon.env
 
-# generate a shared HMAC key
-python3 -c 'import secrets; print(secrets.token_hex(32))' | sudo tee -a /etc/edo/daemon.env
-# then edit /etc/edo/daemon.env so EDO_DAEMON_HMAC_KEY= is the generated value
-# and set EDO_SOCKET_OWNER=root:<ctfd-unix-user>
+# Generate the shared HMAC key ONCE — reused on both sides.
+KEY=$(openssl rand -hex 32)
+sudo sed -i "s|^EDO_DAEMON_HMAC_KEY=.*|EDO_DAEMON_HMAC_KEY=$KEY|" /etc/edo/daemon.env
+sudo sed -i "s|^EDO_SOCKET_OWNER=.*|EDO_SOCKET_OWNER=root:ctfd_socket|" /etc/edo/daemon.env
+echo "COPY THIS INTO docker/.env AS EDO_DAEMON_HMAC_KEY: $KEY"
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now edo-daemon.service
+
+# Sanity check — socket must be root:ctfd_socket 660
+ls -l /run/edo/edo-daemon.sock
 ```
 
-Verify from the admin settings page (`/plugins/edo_plugin/admin/settings`) — the
-"Ping daemon" button should return OK.
+### 2. CTFd (Docker)
+
+The repo ships a full stack in `docker/`. Bring it up from any directory:
+
+```bash
+cd /opt/edo/docker
+cp .env.example .env
+# paste the HMAC key you generated above:
+$EDITOR .env
+
+docker compose up -d --build
+```
+
+That's it. The custom Dockerfile bakes the plugin into `ctfd/ctfd:3.7.5`,
+`docker-compose.yml` bind-mounts `/run/edo` into the container, and the
+plugin creates its tables on first boot.
+
+### 3. Verify
+
+Log in as an admin and hit
+`http://<host>:8000/plugins/edo_plugin/admin/settings` — the "Ping daemon"
+button should return `Daemon OK`. If not:
+
+```bash
+# Container can see the socket?
+docker compose exec ctfd ls -l /run/edo/edo-daemon.sock
+# Should be root:ctfd_socket 660 — a numeric GID 1001 also fine
+
+# Container has the HMAC key?
+docker compose exec ctfd printenv EDO_DAEMON_HMAC_KEY | head -c 8
+
+# Daemon is up?
+sudo systemctl status edo-daemon
+sudo journalctl -u edo-daemon -f
+```
 
 ## Configuration
 

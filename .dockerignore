@@ -1,0 +1,12 @@
+# Excluded from `docker build` context so they don't end up copied into the
+# CTFd image alongside the plugin code. The daemon and docker files ship in
+# the repo for admin convenience; they belong on the host, not in the CTFd
+# container.
+.git
+.gitignore
+docker/
+daemon/
+*.md
+__pycache__/
+*.py[cod]
+.venv/

@@ -1,4 +1,4 @@
 {
-    "name": "edo-plugin",
-    "route": "/plugins/edo"
+    "name": "edo",
+    "route": "/plugins/edo_plugin/admin/settings"
 }
