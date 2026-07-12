@@ -4,32 +4,35 @@
   files, solves tab, and layout. We override three blocks:
 
   - description: difficulty badge + multi-flag progress, then the
-    challenge's own HTML, then the instance panel (spawn/stop/extend +
-    live countdown) — genuinely custom, CTFd has no native concept of
-    per-owner containers.
-  - input/submit: PLAIN elements, deliberately NOT wired to Alpine's
-    x-model="submission"/submitChallenge(). CTFd 3.7.5's native
-    /api/v1/challenges/attempt has no partial-credit concept, so
-    multi-flag progress can't go through it (see challenge_type.py's
-    class docstring on EdoChallengeType.attempt()). Submissions here POST
-    directly to /plugins/edo_plugin/challenges/<id>/submit instead — see
-    view.js, which is now a no-op (nothing left for it to override).
+    challenge's own HTML, then placeholder containers (flag boxes,
+    instance panel) that view.js populates — genuinely custom, CTFd has
+    no native concept of either multi-flag challenges or per-owner
+    containers.
+  - input/submit: left mostly empty (just the hidden challenge-id field
+    CTFd itself doesn't actually read, kept for compatibility) —
+    deliberately NOT wired to Alpine's x-model="submission"/
+    submitChallenge(). CTFd 3.7.5's native /api/v1/challenges/attempt has
+    no partial-credit concept, so multi-flag progress can't go through it
+    (see challenge_type.py's class docstring on
+    EdoChallengeType.attempt()).
+
+  IMPORTANT: there is deliberately NO inline <script> tag here. The
+  participant modal's HTML (this whole rendered template) gets inserted
+  via Alpine's x-html directive (core-beta's challenges.html:
+  x-html="$store.challenge.data.view"), and per the DOM spec, <script>
+  tags inserted through .innerHTML — which is what x-html does under the
+  hood — are silently never executed by the browser. All real behavior
+  (flag box rendering, submission, instance panel) lives in view.js's
+  postRender() hook instead, which CTFd genuinely calls after every
+  challenge display.
 #}
 {% extends "challenge.html" %}
 
 {% block input %}
 <input id="challenge-id" class="challenge-id" type="hidden" value="{{ challenge.id }}">
-<input
-    id="edo-flag-input" class="form-control"
-    type="text" placeholder="{% trans %}Flag{% endtrans %}" autocomplete="off"
->
 {% endblock %}
 
-{% block submit %}
-<button id="edo-flag-submit" type="button" class="btn btn-outline-secondary w-100 h-100">
-  {% trans %}Submit{% endtrans %}
-</button>
-{% endblock %}
+{% block submit %}{% endblock %}
 
 {% block description %}
 <span class="edo-difficulty edo-difficulty-{{ challenge.difficulty }}">
@@ -39,9 +42,8 @@
 <br>
 {{ challenge.html }}
 
-<div id="edo-submit-row" class="mt-2">
-  <div id="edo-submit-alert" class="alert text-center w-100" style="display:none;"></div>
-</div>
+<div id="edo-flags-container" class="mt-2"></div>
+<div id="edo-submit-alert" class="alert text-center w-100" style="display:none;"></div>
 
 <div id="edo-instance-panel" data-challenge-id="{{ challenge.id }}" class="mt-3">
   <div class="edo-instance-status text-muted">Checking instance…</div>
@@ -49,163 +51,4 @@
   <button class="btn btn-danger  btn-sm edo-stop"  style="display:none;">Stop</button>
   <button class="btn btn-warning btn-sm edo-extend" style="display:none;" disabled>Extend</button>
 </div>
-
-<script>
-(function () {
-  const chalId = {{ challenge.id }};
-  const flagInput  = document.getElementById("edo-flag-input");
-  const flagSubmit = document.getElementById("edo-flag-submit");
-  const alertBox   = document.getElementById("edo-submit-alert");
-
-  function showAlert(ok, message) {
-    alertBox.textContent = message;
-    alertBox.className = "alert text-center w-100 " + (ok ? "alert-success" : "alert-danger");
-    alertBox.style.display = "";
-  }
-
-  async function submitFlag() {
-    const submission = flagInput.value;
-    if (!submission) return;
-    flagSubmit.disabled = true;
-    let keepDisabled = false;
-    try {
-      const res = await CTFd.fetch(`/plugins/edo_plugin/challenges/${chalId}/submit`, {
-        method: "POST",
-        body: JSON.stringify({ submission }),
-      });
-      const j = await res.json();
-      if (!j.success) {
-        showAlert(false, j.error === "rate_limited"
-          ? `Too many attempts — try again in ${j.retry_after}s`
-          : j.error === "attempts_exhausted"
-          ? "No attempts remaining."
-          : (j.error || "Something went wrong."));
-        return;
-      }
-      showAlert(j.correct, j.message);
-      if (j.correct) {
-        flagInput.value = "";
-        refreshProgress();
-      }
-      if (j.complete) {
-        flagInput.disabled = true;
-        keepDisabled = true;
-      }
-    } finally {
-      flagSubmit.disabled = keepDisabled;
-    }
-  }
-
-  flagSubmit.onclick = submitFlag;
-  flagInput.addEventListener("keyup", (e) => {
-    if (e.key === "Enter") submitFlag();
-  });
-
-  const panel = document.getElementById("edo-instance-panel");
-  const chal  = panel.dataset.challengeId;
-  const status = panel.querySelector(".edo-instance-status");
-  const spawn  = panel.querySelector(".edo-spawn");
-  const stop   = panel.querySelector(".edo-stop");
-  const extend = panel.querySelector(".edo-extend");
-  const progressEl = document.getElementById("edo-progress");
-
-  let timer = null;
-
-  function render(inst) {
-    if (!inst) {
-      status.textContent = "No instance running.";
-      spawn.style.display  = "";
-      stop.style.display   = "none";
-      extend.style.display = "none";
-      if (timer) { clearInterval(timer); timer = null; }
-      return;
-    }
-    spawn.style.display  = "none";
-    stop.style.display   = "";
-    extend.style.display = "";
-    extend.disabled = !inst.can_extend;
-
-    let remaining = inst.remaining_seconds;
-    function firstPort() {
-      // A list of ports the container listens on (Dockerfile EXPOSE) —
-      // connect directly to assigned_ip on these, no host-port mapping.
-      try {
-        const ports = JSON.parse(inst.host_ports || "[]");
-        return ports.length ? ports[0].split("/")[0] : "?";
-      } catch (e) {
-        return "?";
-      }
-    }
-    function tick() {
-      const m = String(Math.floor(remaining / 60)).padStart(2, "0");
-      const s = String(remaining % 60).padStart(2, "0");
-      status.innerHTML =
-        `Endpoint <code>${inst.assigned_ip || "?"}:${firstPort()}</code> · `
-        + `${m}:${s} remaining`;
-      remaining--;
-      if (remaining < 0) refresh();
-    }
-    tick();
-    if (timer) clearInterval(timer);
-    timer = setInterval(tick, 1000);
-  }
-
-  async function refresh() {
-    const res = await CTFd.fetch("/plugins/edo_plugin/dashboard/data");
-    if (!res.ok) return render(null);
-    const j = await res.json();
-    const inst = (j.instances || []).find(i => String(i.challenge_id) === String(chal));
-    render(inst || null);
-  }
-
-  async function refreshProgress() {
-    const res = await CTFd.fetch(`/plugins/edo_plugin/challenges/${chal}/progress`);
-    if (!res.ok) return;
-    const j = await res.json();
-    if (!j.success || j.flags_total <= 1) {
-      progressEl.textContent = "";  // single-flag challenges don't need this
-      return;
-    }
-    progressEl.textContent =
-      `· ${j.flags_solved}/${j.flags_total} flags captured (${j.percent_earned}%)`;
-  }
-
-  spawn.onclick = async () => {
-    spawn.disabled = true;
-    const res = await CTFd.fetch(`/plugins/edo_plugin/challenges/${chal}/instance`, {method: "POST"});
-    const j = await res.json();
-    if (!j.success) alert(j.error + (j.detail ? `: ${j.detail}` : ""));
-    spawn.disabled = false;
-    refresh();
-  };
-  stop.onclick = async () => {
-    const inst = await currentInstance();
-    if (!inst) return;
-    await CTFd.fetch(`/plugins/edo_plugin/instances/${inst.id}`, {method: "DELETE"});
-    refresh();
-  };
-  extend.onclick = async () => {
-    const inst = await currentInstance();
-    if (!inst) return;
-    const res = await CTFd.fetch(`/plugins/edo_plugin/instances/${inst.id}/extend`, {method: "POST"});
-    const j = await res.json();
-    if (!j.success) alert(j.error);
-    refresh();
-  };
-
-  async function currentInstance() {
-    const res = await CTFd.fetch("/plugins/edo_plugin/dashboard/data");
-    const j   = await res.json();
-    return (j.instances || []).find(i => String(i.challenge_id) === String(chal));
-  }
-
-  // Every time the modal opens, CTFd re-fetches and re-renders this whole
-  // template (see ChallengeBoard.loadChallenge in challenges.js), which
-  // re-runs this script block fresh — so a one-shot refresh on load is
-  // sufficient; submitFlag() above calls refreshProgress() again after
-  // every correct submission to keep the counter live without a reopen.
-  refresh();
-  refreshProgress();
-})();
-</script>
 {% endblock %}
