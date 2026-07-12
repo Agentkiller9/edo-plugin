@@ -20,9 +20,14 @@ ExecStart=/opt/edo/venv/bin/python3 /opt/edo/daemon/edo_daemon.py
 Restart=on-failure
 RestartSec=3
 # Give us just enough — we shell out to iptables/wg/docker so we need
-# NET_ADMIN and the ability to reach /var/run/docker.sock.
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+# NET_ADMIN and the ability to reach /var/run/docker.sock. CAP_CHOWN is
+# required even though we run as root: CapabilityBoundingSet restricts
+# which capabilities a process can use AT ALL, regardless of UID, and
+# os.chown() on the RPC socket is gated specifically by CAP_CHOWN — NOT by
+# CAP_DAC_OVERRIDE, which only bypasses permission-bit (rwx) checks, not
+# ownership changes. Without it, chown() fails with EPERM even for UID 0.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE CAP_CHOWN
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN
 NoNewPrivileges=yes
 ProtectSystem=strict
 # Dash prefix = "OK if missing at boot" — /etc/wireguard doesn't exist until
