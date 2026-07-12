@@ -160,19 +160,36 @@ class EdoChallengeType(BaseChallenge):
         db.session.commit()
 
     # ---------- Attempt / Solve ----------
+    #
+    # CTFd's /api/v1/challenges/attempt view only calls attempt() at all
+    # when the account has NO existing Solves row for this challenge
+    # (`if not solves:` — checked in CTFd core, not here). The instant a
+    # Solves row exists, EVERY future submission — including a genuinely
+    # different, still-unfound flag — gets short-circuited into
+    # "already_solved" without ever reaching this class again.
+    #
+    # That means a multi-flag challenge CANNOT insert a Solves row on the
+    # first correct flag, or every later flag becomes unsubmittable. CTFd
+    # anticipates exactly this with a third attempt() outcome beyond
+    # correct/incorrect: returning ("partial", message) calls partial()
+    # instead of solve() and skips the Solves insert, so the account can
+    # keep submitting. Only once every flag is found does attempt() return
+    # a real "correct", which finally calls solve() and inserts the Solves
+    # row — CTFd's scoreboard sums Challenges.value per Solve with no
+    # concept of a fractional award, so a flag's weight_pct can only ever
+    # be a progress/display figure (see owner_progress()), not literal
+    # partial points on the scoreboard — full value is awarded once, when
+    # the last flag completes the set.
 
     @classmethod
-    def attempt(cls, challenge, request) -> tuple[bool, str]:
+    def attempt(cls, challenge, request):
         """
-        Try to solve one of the challenge's flags.
+        Try to match the submission against one of the challenge's flags.
 
-        Returns (correct, message). CTFd calls this from the
-        /api/v1/challenges/attempt pathway — the ONLY entry point;
-        there's no separate custom submission route, so the rate-limit
-        check lives here rather than in a route decorator, guaranteeing
-        it fires regardless of which endpoint served the request. We
-        don't award points here — CTFd's Solves table does that via the
-        value returned by read().value.
+        Returns (True, msg) once ALL flags are found (triggers solve()),
+        ("partial", msg) when a NEW flag is found but others remain
+        (triggers partial() — no Solves row, so submission stays open),
+        or (False, msg) otherwise.
         """
         from .config import EdoConfig
         from .decorators import check_rate_limit
@@ -197,35 +214,85 @@ class EdoChallengeType(BaseChallenge):
         if not submission:
             return False, "Empty submission"
 
-        for flag in Flags.query.filter_by(challenge_id=challenge.id).all():
-            if get_flag_class(flag.type).compare(flag, submission):
-                return True, "Correct"
-        return False, "Incorrect"
+        flag = _first_matching_flag(challenge.id, submission)
+        if flag is None:
+            return False, "Incorrect"
+
+        if owner is None:
+            # Shouldn't happen (spawning/etc. all require a resolved
+            # owner), but attempt() is reachable via CTFd's own endpoint
+            # regardless of our route decorators — fail closed.
+            return False, "Incorrect"
+        owner_type, owner_id = owner
+
+        if EdoFlagSolve.query.filter_by(
+            owner_type=owner_type, owner_id=owner_id, flag_id=flag.id
+        ).first():
+            return "partial", "You already found this flag"
+
+        total_flags = Flags.query.filter_by(challenge_id=challenge.id).count()
+        found_so_far = EdoFlagSolve.query.filter_by(
+            owner_type=owner_type, owner_id=owner_id, challenge_id=challenge.id
+        ).count()
+        if found_so_far + 1 >= total_flags:
+            return True, "Correct! All flags captured."
+        return "partial", f"Correct! {found_so_far + 1}/{total_flags} flags found."
+
+    @classmethod
+    def partial(cls, user, team, challenge, request):
+        """
+        Called by CTFd when attempt() returns "partial" — a real flag was
+        found but the challenge isn't fully solved yet. Records the flag
+        find WITHOUT touching CTFd's Solves table, so the account can keep
+        submitting the remaining flags (see the class-level note above for
+        why inserting a Solve here would lock further submissions out).
+        """
+        cls._record_flag_solve(user, team, challenge, request)
 
     @classmethod
     def solve(cls, user, team, challenge, request):
         """
-        Called by CTFd once `attempt()` returns True. Records BOTH a CTFd
-        Solve (so the scoreboard picks it up) and an EdoFlagSolve row (so
-        partial credit and multi-flag progress work).
+        Called by CTFd once attempt() returns a real "correct" — the LAST
+        flag needed to complete the challenge. Records that flag AND
+        inserts the CTFd Solve row, which is what the scoreboard reads.
         """
+        cls._record_flag_solve(user, team, challenge, request)
+
+        owner_id = team.id if team else user.id
+        already_solved = Solves.query.filter_by(
+            challenge_id=challenge.id,
+            **({"team_id": owner_id} if team else {"user_id": owner_id}),
+        ).first()
+        if already_solved is None:
+            data = request.form or request.get_json() or {}
+            submission = (data.get("submission") or "").strip()
+            db.session.add(Solves(
+                user_id=user.id,
+                team_id=team.id if team else None,
+                challenge_id=challenge.id,
+                ip=request.access_route[0] if request.access_route else request.remote_addr,
+                provided=submission,
+            ))
+        db.session.commit()
+
+    @classmethod
+    def _record_flag_solve(cls, user, team, challenge, request):
+        """Shared by partial() and solve(): record this owner having found
+        this specific flag, idempotently."""
         data = request.form or request.get_json() or {}
         submission = (data.get("submission") or "").strip()
-
         flag = _first_matching_flag(challenge.id, submission)
         if flag is None:
-            # attempt() said yes but nothing matched — race with a flag edit.
-            # Bail cleanly rather than double-solving.
+            # attempt() said yes but nothing matched — race with a flag
+            # edit between attempt() and this call. Bail cleanly.
             return
 
         owner_type = "team" if team is not None else "user"
         owner_id = team.id if team is not None else user.id
 
-        # Idempotency: never record the same (owner, flag) solve twice.
-        existing = EdoFlagSolve.query.filter_by(
+        if EdoFlagSolve.query.filter_by(
             owner_type=owner_type, owner_id=owner_id, flag_id=flag.id
-        ).first()
-        if existing is not None:
+        ).first():
             return
 
         db.session.add(EdoFlagSolve(
@@ -234,23 +301,6 @@ class EdoChallengeType(BaseChallenge):
             owner_type=owner_type,
             owner_id=owner_id,
         ))
-
-        # Only insert a CTFd Solve row on the *first* correct flag for this
-        # (owner, challenge). Subsequent flags top up the value the
-        # scoreboard reads via read().value.
-        already_solved = Solves.query.filter_by(
-            challenge_id=challenge.id,
-            **({"team_id": owner_id} if team else {"user_id": owner_id}),
-        ).first()
-        if already_solved is None:
-            solve = Solves(
-                user_id=user.id,
-                team_id=team.id if team else None,
-                challenge_id=challenge.id,
-                ip=request.access_route[0] if request.access_route else request.remote_addr,
-                provided=submission,
-            )
-            db.session.add(solve)
         db.session.commit()
 
     @classmethod
