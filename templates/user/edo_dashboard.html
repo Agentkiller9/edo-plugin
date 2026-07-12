@@ -32,6 +32,7 @@
   const grid    = document.getElementById("edo-instances");
   const empty   = document.getElementById("edo-empty");
   const summary = document.getElementById("edo-summary");
+  let publicIp  = null;
 
   function fmt(sec) {
     sec = Math.max(0, sec | 0);
@@ -40,19 +41,35 @@
     return `${m}:${s}`;
   }
 
-  function parsePorts(raw) {
-    // A list of ports the container listens on (read from the Dockerfile's
-    // EXPOSE directive) — connect directly to assigned_ip on these, no
-    // host-port mapping involved.
+  function parseJson(raw, fallback) {
     try {
-      return JSON.parse(raw || "[]");
+      return JSON.parse(raw || (Array.isArray(fallback) ? "[]" : "{}"));
     } catch (e) {
-      return [];
+      return fallback;
     }
   }
 
+  // Same rules as the challenge modal (view.js): access_mode="public" uses
+  // the server's public IP + the real published host port; "vpn" (default)
+  // uses the container's own routed IP + the port it EXPOSEs. B2R never
+  // shows a port at all.
+  function addressText(inst) {
+    let host, port;
+    if (inst.access_mode === "public") {
+      host = publicIp || "?";
+      const map = parseJson(inst.published_ports, {});
+      const keys = Object.keys(map);
+      port = keys.length ? map[keys[0]] : null;
+    } else {
+      host = inst.assigned_ip || "?";
+      const ports = parseJson(inst.host_ports, []);
+      port = ports.length ? ports[0].split("/")[0] : null;
+    }
+    if (inst.category === "B2R" || port == null) return host;
+    return `${host}:${port}`;
+  }
+
   function card(inst) {
-    const ports = parsePorts(inst.host_ports);
     return `
       <div class="col-md-6 mb-3">
         <div class="card">
@@ -62,9 +79,7 @@
               <span class="badge badge-secondary">${inst.status}</span>
             </h5>
             <p class="card-text">
-              <strong>Address:</strong> ${inst.assigned_ip || "?"}
-              <br>
-              <strong>Ports:</strong> ${ports.length ? ports.join(", ") : "-"}
+              <strong>Address:</strong> ${addressText(inst)}
               <br>
               <strong>Expires in:</strong>
               <span class="edo-countdown" data-remaining="${inst.remaining_seconds}">
@@ -88,6 +103,7 @@
     if (!res.ok) return;
     const data = await res.json();
     if (!data.success) return;
+    if (data.public_ip) publicIp = data.public_ip;
 
     summary.textContent =
       `Max ${data.max_containers} concurrent. ` +

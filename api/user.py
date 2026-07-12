@@ -71,11 +71,13 @@ def dashboard_data():
     max_containers = _setting(
         "max_containers_per_owner", EdoConfig.DEFAULT_MAX_CONTAINERS_PER_OWNER
     )
+    public_ip = _setting("public_ip", EdoConfig.DEFAULT_PUBLIC_IP, cast=str)
 
     return jsonify(
         success=True,
         max_containers=max_containers,
         extend_threshold_seconds=extend_threshold,
+        public_ip=public_ip,
         instances=[_serialize_instance(i, extend_threshold) for i in instances],
     )
 
@@ -155,6 +157,7 @@ def spawn_instance(challenge_id: int):
                 "read_only_rootfs": bool(challenge.read_only_rootfs),
             },
             ttl_seconds=ttl,
+            publish_ports=(challenge.access_mode == "public"),
         )
     except DaemonError as e:
         # Delete rather than mark "error": unlike a teardown failure (where
@@ -174,7 +177,8 @@ def spawn_instance(challenge_id: int):
     inst.container_id   = result.get("container_id")
     inst.container_name = result.get("container_name")
     inst.assigned_ip     = result.get("assigned_ip")
-    inst.host_ports      = json.dumps(result.get("ports") or [])
+    inst.host_ports       = json.dumps(result.get("ports") or [])
+    inst.published_ports  = json.dumps(result.get("published_ports") or {})
     inst.status          = "running"
     _audit("user", "spawn", inst)
     db.session.commit()
@@ -387,12 +391,16 @@ def _owned_instance(instance_id: int):
 def _serialize_instance(i: EdoInstance, extend_threshold: int) -> dict:
     now = datetime.utcnow()
     remaining = int((i.expires_at - now).total_seconds()) if i.expires_at else 0
+    challenge = EdoChallenge.query.get(i.challenge_id)
     return {
         "id": i.id,
         "challenge_id": i.challenge_id,
+        "category": challenge.category if challenge else None,
+        "access_mode": challenge.access_mode if challenge else "vpn",
         "container_name": i.container_name,
         "assigned_ip": i.assigned_ip,
         "host_ports": i.host_ports,
+        "published_ports": i.published_ports,
         "status": i.status,
         "expires_at": i.expires_at.isoformat() if i.expires_at else None,
         "remaining_seconds": max(remaining, 0),

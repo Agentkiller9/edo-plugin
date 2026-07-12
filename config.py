@@ -31,6 +31,10 @@ class EdoConfig:
     DEFAULT_SUBMIT_RATE_LIMIT = 10                    # attempts per window
     DEFAULT_SUBMIT_RATE_WINDOW = 60                   # seconds
     DEFAULT_VPN_SERVER_ENDPOINT = "vpn.example.com:51820"
+    # Shown to participants for access_mode="public" challenges instead of
+    # their VPN-assigned IP — the plain host/IP address, no port (each
+    # instance's own published port is appended per-owner at render time).
+    DEFAULT_PUBLIC_IP = "203.0.113.1"
     DEFAULT_RECONCILE_INTERVAL_SECONDS = 60
     DEFAULT_TTL_CHECK_INTERVAL_SECONDS = 15
 

@@ -165,6 +165,54 @@ function initEdoChallenge(chalId) {
   var stop = panel.querySelector(".edo-stop");
   var extend = panel.querySelector(".edo-extend");
 
+  var challengeData = CTFd._internal.challenge.data || {};
+  var category = challengeData.category || "";
+  var accessMode = challengeData.access_mode || "vpn";
+  // Only known after the first dashboard/data fetch (refresh(), below) —
+  // it's a global admin setting, not part of the challenge/instance data.
+  var publicIp = null;
+
+  // Category-based display rule: B2R challenges show just the host, no
+  // port — everything else shows host:port as usual.
+  function endpointText(inst) {
+    var host, port;
+    if (accessMode === "public") {
+      host = publicIp || "?";
+      port = firstPublishedPort(inst);
+    } else {
+      host = inst.assigned_ip || "?";
+      port = firstExposedPort(inst);
+    }
+    if (category === "B2R" || port == null) {
+      return host;
+    }
+    return `${host}:${port}`;
+  }
+
+  function firstExposedPort(inst) {
+    // access_mode="vpn": a list of ports the container listens on
+    // (Dockerfile EXPOSE) — connect directly to assigned_ip on these, no
+    // host-port mapping.
+    try {
+      var ports = JSON.parse(inst.host_ports || "[]");
+      return ports.length ? ports[0].split("/")[0] : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function firstPublishedPort(inst) {
+    // access_mode="public": {container_port: host_port, ...} — the real
+    // host port Docker bound for this owner's container.
+    try {
+      var map = JSON.parse(inst.published_ports || "{}");
+      var keys = Object.keys(map);
+      return keys.length ? map[keys[0]] : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function render(inst) {
     if (!inst) {
       status.textContent = "No instance running.";
@@ -180,21 +228,11 @@ function initEdoChallenge(chalId) {
     extend.disabled = !inst.can_extend;
 
     var remaining = inst.remaining_seconds;
-    function firstPort() {
-      // A list of ports the container listens on (Dockerfile EXPOSE) —
-      // connect directly to assigned_ip on these, no host-port mapping.
-      try {
-        var ports = JSON.parse(inst.host_ports || "[]");
-        return ports.length ? ports[0].split("/")[0] : "?";
-      } catch (e) {
-        return "?";
-      }
-    }
     function tick() {
       var m = String(Math.floor(remaining / 60)).padStart(2, "0");
       var s = String(remaining % 60).padStart(2, "0");
       status.innerHTML =
-        `Endpoint <code>${inst.assigned_ip || "?"}:${firstPort()}</code> · `
+        `Endpoint <code>${endpointText(inst)}</code> · `
         + `${m}:${s} remaining`;
       remaining--;
       if (remaining < 0) refresh();
@@ -208,6 +246,7 @@ function initEdoChallenge(chalId) {
     var res = await CTFd.fetch("/plugins/edo_plugin/dashboard/data");
     if (!res.ok) return render(null);
     var j = await res.json();
+    if (j.public_ip) publicIp = j.public_ip;
     var inst = (j.instances || []).find(i => String(i.challenge_id) === String(chalId));
     render(inst || null);
   }

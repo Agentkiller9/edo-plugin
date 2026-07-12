@@ -46,6 +46,7 @@ def settings_page():
         "submit_rate_limit":       EdoConfig.DEFAULT_SUBMIT_RATE_LIMIT,
         "submit_rate_window":      EdoConfig.DEFAULT_SUBMIT_RATE_WINDOW,
         "vpn_server_endpoint":     EdoConfig.DEFAULT_VPN_SERVER_ENDPOINT,
+        "public_ip":               EdoConfig.DEFAULT_PUBLIC_IP,
         "reconcile_interval_seconds": EdoConfig.DEFAULT_RECONCILE_INTERVAL_SECONDS,
         "ttl_check_interval_seconds": EdoConfig.DEFAULT_TTL_CHECK_INTERVAL_SECONDS,
     }
@@ -64,7 +65,7 @@ def settings_save():
         "max_containers_per_owner", "container_ttl_seconds",
         "extend_seconds", "extend_threshold_seconds",
         "submit_rate_limit", "submit_rate_window",
-        "vpn_server_endpoint",
+        "vpn_server_endpoint", "public_ip",
         "reconcile_interval_seconds", "ttl_check_interval_seconds",
     }
     for k, v in payload.items():
@@ -348,6 +349,7 @@ def _serialize_instance(i: EdoInstance) -> dict:
         "owner_name": owner_display_name(i.owner_type, i.owner_id),
         "container_id": i.container_id, "container_name": i.container_name,
         "assigned_ip": i.assigned_ip, "host_ports": i.host_ports,
+        "published_ports": i.published_ports,
         "status": i.status,
         "created_at": i.created_at.isoformat() if i.created_at else None,
         "expires_at": i.expires_at.isoformat() if i.expires_at else None,

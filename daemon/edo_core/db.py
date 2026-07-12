@@ -68,6 +68,7 @@ class Instance:
     ports: str  # JSON-encoded
     status: str
     expires_at: Optional[str]  # ISO 8601 text; NULL means no TTL
+    published_ports: Optional[str] = None  # JSON-encoded {container_port: host_port}
 
 
 class DatabaseManager:
@@ -129,21 +130,31 @@ class DatabaseManager:
             c.execute(
                 """
                 CREATE TABLE IF NOT EXISTS instances (
-                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                    container_id   TEXT UNIQUE NOT NULL,
-                    container_name TEXT NOT NULL,
-                    owner_type     TEXT NOT NULL,
-                    owner_id       INTEGER NOT NULL,
-                    challenge_ref  TEXT NOT NULL,
-                    assigned_ip    TEXT NOT NULL,
-                    ports          TEXT,
-                    status         TEXT NOT NULL DEFAULT 'running',
-                    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    expires_at     TIMESTAMP,
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    container_id    TEXT UNIQUE NOT NULL,
+                    container_name  TEXT NOT NULL,
+                    owner_type      TEXT NOT NULL,
+                    owner_id        INTEGER NOT NULL,
+                    challenge_ref   TEXT NOT NULL,
+                    assigned_ip     TEXT NOT NULL,
+                    ports           TEXT,
+                    published_ports TEXT,
+                    status          TEXT NOT NULL DEFAULT 'running',
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at      TIMESTAMP,
                     UNIQUE (owner_type, owner_id, challenge_ref)
                 )
                 """
             )
+            # No formal migration system here (single small SQLite file) —
+            # for an existing DB from before published_ports existed, add
+            # it directly. Idempotent: SQLite has no "ADD COLUMN IF NOT
+            # EXISTS", so just swallow the "duplicate column" error.
+            try:
+                c.execute("ALTER TABLE instances ADD COLUMN published_ports TEXT")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
             c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # ---- peers -------------------------------------------------------
@@ -317,17 +328,18 @@ class DatabaseManager:
         ports: str,
         expires_at: Optional[str],
         status: str = "running",
+        published_ports: Optional[str] = None,
     ) -> Instance:
         try:
             with self._conn() as c:
                 cur = c.execute(
                     "INSERT INTO instances"
                     " (container_id, container_name, owner_type, owner_id,"
-                    "  challenge_ref, assigned_ip, ports, status, expires_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "  challenge_ref, assigned_ip, ports, published_ports, status, expires_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         container_id, container_name, owner_type, owner_id,
-                        challenge_ref, assigned_ip, ports, status, expires_at,
+                        challenge_ref, assigned_ip, ports, published_ports, status, expires_at,
                     ),
                 )
                 row_id = int(cur.lastrowid)
@@ -337,6 +349,7 @@ class DatabaseManager:
             id=row_id, container_id=container_id, container_name=container_name,
             owner_type=owner_type, owner_id=owner_id, challenge_ref=challenge_ref,
             assigned_ip=assigned_ip, ports=ports, status=status, expires_at=expires_at,
+            published_ports=published_ports,
         )
 
     def remove_instance(self, container_id: str) -> bool:
@@ -407,4 +420,5 @@ def _row_to_instance(row: sqlite3.Row) -> Instance:
         owner_type=row["owner_type"], owner_id=row["owner_id"],
         challenge_ref=row["challenge_ref"], assigned_ip=row["assigned_ip"],
         ports=row["ports"], status=row["status"], expires_at=row["expires_at"],
+        published_ports=row["published_ports"],
     )

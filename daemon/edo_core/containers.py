@@ -101,16 +101,27 @@ class SecurityProfile:
         return " ".join(bits)
 
 
-def _build_secure_host_config(client: "docker.DockerClient", profile: SecurityProfile) -> dict:
+def _build_secure_host_config(
+    client: "docker.DockerClient",
+    profile: SecurityProfile,
+    publish_ports: Optional[List[str]] = None,
+) -> dict:
     """
-    Deliberately never sets port_bindings. Docker's host-port publishing
+    By default never sets port_bindings. Docker's host-port publishing
     installs its own NAT/DNAT rules in the `nat` table's DOCKER chain,
     which are evaluated on PREROUTING — *before* our EDO_FORWARD isolation
     rules in the `filter` table ever see the packet. A published port would
     be reachable from the entire public internet via <host-ip>:<port>,
-    completely bypassing per-owner VPN isolation. Participants only ever
-    reach a container via its own routed IP over the VPN (see
-    network.py); there is no legitimate reason to publish a host port here.
+    completely bypassing per-owner VPN isolation. Participants normally
+    reach a container via its own routed IP over the VPN (see network.py).
+
+    publish_ports is the deliberate, explicit exception: for a challenge an
+    admin has opted into access_mode="public" (see EdoChallenge.access_mode
+    / models.py), bypassing that isolation is the intended behavior, not a
+    regression of it — the whole point is reachability without a VPN, same
+    as a normal public web challenge. Each entry gets bound to host port
+    None (0), i.e. Docker picks a free ephemeral port — every owner's
+    container needs its own, there's no fixed port to reuse across owners.
     """
     kwargs: dict = {"restart_policy": {"Name": profile.restart_policy}}
     security_opt: List[str] = []
@@ -131,6 +142,8 @@ def _build_secure_host_config(client: "docker.DockerClient", profile: SecurityPr
     if profile.read_only_rootfs:
         kwargs["read_only"] = True
         kwargs["tmpfs"] = {"/tmp": "rw,size=64m,exec"}
+    if publish_ports:
+        kwargs["port_bindings"] = {port: None for port in publish_ports}
     return client.api.create_host_config(**kwargs)
 
 
@@ -343,6 +356,18 @@ def _live_container_ip(container, network_name: str) -> Optional[str]:
     return net.get("IPAddress") or None
 
 
+def _live_published_ports(container) -> dict:
+    """Read back the actual host ports Docker bound for this container
+    (access_mode="public" challenges only — see spawn_instance's
+    publish_ports). {} if none are published."""
+    live_ports = container.attrs.get("NetworkSettings", {}).get("Ports") or {}
+    return {
+        container_port: int(bindings[0]["HostPort"])
+        for container_port, bindings in live_ports.items()
+        if bindings
+    }
+
+
 # ---- spawn / release ----------------------------------------------------
 
 def spawn_instance(
@@ -353,6 +378,7 @@ def spawn_instance(
     build_path: Path,
     security: Optional[SecurityProfile] = None,
     ttl_seconds: Optional[int] = None,
+    publish_ports: bool = False,
 ) -> SpawnResult:
     """Build (if needed) and run one owner-scoped container.
 
@@ -360,10 +386,14 @@ def spawn_instance(
     instance, returns it rather than spawning a duplicate — mirrors the DB
     unique constraint on (owner_type, owner_id, challenge_ref).
 
-    No port is ever published to the host (see _build_secure_host_config).
-    Participants reach the container directly at its own routed IP over the
-    VPN, so the ports the container listens on are read straight from the
-    Dockerfile's EXPOSE metadata after build — nothing to configure here.
+    By default no port is ever published to the host (see
+    _build_secure_host_config) — participants reach the container directly
+    at its own routed IP over the VPN, so the ports the container listens
+    on are read straight from the Dockerfile's EXPOSE metadata after
+    build. publish_ports=True is the explicit per-challenge opt-out (see
+    EdoChallenge.access_mode): each exposed port gets bound to a
+    dynamically-allocated host port instead, read back after the container
+    starts and returned as part of the Instance.
     """
     existing = db.find_instance(owner_type, owner_id, challenge_ref)
     if existing is not None:
@@ -389,7 +419,9 @@ def spawn_instance(
     if ttl_seconds is not None:
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
 
-    host_cfg = _build_secure_host_config(client, profile)
+    host_cfg = _build_secure_host_config(
+        client, profile, publish_ports=exposed_ports if publish_ports else None
+    )
 
     container = None
     assigned_ip: Optional[str] = None
@@ -436,6 +468,8 @@ def spawn_instance(
     assigned_ip = _live_container_ip(container, network_name) or assigned_ip
     container.reload()
 
+    published_port_map = _live_published_ports(container) if publish_ports else {}
+
     try:
         instance = db.add_instance(
             container_id=container.id,
@@ -445,6 +479,7 @@ def spawn_instance(
             challenge_ref=challenge_ref,
             assigned_ip=assigned_ip,
             ports=json.dumps(exposed_ports),
+            published_ports=json.dumps(published_port_map) if published_port_map else None,
             expires_at=expires_at,
         )
     except Exception as e:
@@ -540,12 +575,14 @@ def adopt_untracked(db: DatabaseManager) -> int:
         ip = _live_container_ip(c, network_name) or ""
         expires = labels.get(EXPIRES_LABEL) or None
         ports = [p for p in (labels.get(PORTS_LABEL) or "").split(",") if p]
+        published = _live_published_ports(c)
         try:
             db.add_instance(
                 container_id=c.id, container_name=c.name,
                 owner_type=owner_type, owner_id=int(owner_id),
                 challenge_ref=challenge_ref, assigned_ip=ip,
                 ports=json.dumps(ports),
+                published_ports=json.dumps(published) if published else None,
                 expires_at=expires, status=c.status,
             )
             adopted += 1

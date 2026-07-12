@@ -91,7 +91,7 @@ class EdoChallengeType(BaseChallenge):
             "name", "description", "category", "value", "state", "attribution",
             "difficulty", "scoring_mode",
             "initial_value", "minimum_value", "decay",
-            "build_path",
+            "build_path", "access_mode",
             "cpu_limit", "memory_limit_mb", "pids_limit",
             "read_only_rootfs", "ttl_seconds",
         }
@@ -126,6 +126,7 @@ class EdoChallengeType(BaseChallenge):
             "minimum_value": challenge.minimum_value,
             "decay": challenge.decay,
             "build_path": challenge.build_path,
+            "access_mode": challenge.access_mode,
             "cpu_limit": challenge.cpu_limit,
             "memory_limit_mb": challenge.memory_limit_mb,
             "pids_limit": challenge.pids_limit,
@@ -141,7 +142,7 @@ class EdoChallengeType(BaseChallenge):
             "attribution", "connection_info", "position",
             "difficulty", "scoring_mode",
             "initial_value", "minimum_value", "decay",
-            "build_path",
+            "build_path", "access_mode",
             "cpu_limit", "memory_limit_mb", "pids_limit",
             "read_only_rootfs", "ttl_seconds",
         }

@@ -77,6 +77,15 @@ class EdoChallenge(Challenges):
     read_only_rootfs = db.Column(db.Boolean, default=False, nullable=False)
     # Per-challenge TTL override, in seconds; NULL means "use EdoSettings default".
     ttl_seconds = db.Column(db.Integer)
+    # "vpn" (default): participants reach their own container at its routed
+    # IP over WireGuard, no host port ever published — the isolation model
+    # everything else in this file assumes. "public": the daemon instead
+    # publishes each owner's container ports to dynamically-allocated host
+    # ports on the server's own public IP, so participants can reach it
+    # directly, no VPN required (typical for web-category challenges).
+    # Deliberately per-challenge, not global — most challenge types still
+    # want the VPN-isolated default; this is an opt-in exception.
+    access_mode = db.Column(db.String(8), default="vpn", nullable=False)
 
     def __init__(self, *args, **kwargs):
         super().__init__(**kwargs)
@@ -164,6 +173,12 @@ class EdoInstance(db.Model):
     # from the built image's own EXPOSE metadata — not a host-port mapping.
     assigned_ip = db.Column(db.String(64))
     host_ports = db.Column(db.String(256))
+    # Only populated for access_mode="public" challenges: JSON dict mapping
+    # container port -> the host port the daemon actually bound it to, e.g.
+    # {"80/tcp": 34521}. Ports are dynamically allocated per owner (Docker
+    # picks a free ephemeral port), since every owner's container needs its
+    # own — there's no fixed port to hardcode. Empty/null for "vpn" mode.
+    published_ports = db.Column(db.String(512))
 
     status = db.Column(db.String(24), default="pending", nullable=False)
     # status ∈ {pending, running, expired, stopped, error, orphaned}

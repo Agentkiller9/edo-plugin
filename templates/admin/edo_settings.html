@@ -45,6 +45,16 @@
           editable here.
         </small>
 
+        <label class="mt-2">Server public IP</label>
+        <input name="public_ip" class="form-control"
+               value="{{ values.public_ip }}">
+        <small class="form-text text-muted">
+          Shown to participants instead of their VPN IP for challenges set
+          to "Server public IP" access mode (per-challenge, in that
+          challenge's edit page) — those containers get a real published
+          host port instead of a VPN-only address.
+        </small>
+
         <h4 class="mt-4">Workers</h4>
         <label>TTL sweep interval (seconds)</label>
         <input name="ttl_check_interval_seconds" type="number" min="5" class="form-control"

@@ -50,6 +50,7 @@ def load(app):
             EdoAuditLog.__table__,
             EdoWorkerLease.__table__,
         ])
+        _run_column_migrations()
 
     # 2. Register challenge type.
     CHALLENGE_CLASSES["edo"] = EdoChallengeType
@@ -87,6 +88,27 @@ def load(app):
     logger.info("edo-plugin loaded (daemon=%s)", EdoConfig.DAEMON_SOCKET_PATH)
 
 
+def _run_column_migrations():
+    """
+    create_all() only creates whole tables that don't exist yet — it never
+    alters an EXISTING table to add a column a newer version of a model
+    introduced (there's no Alembic migrations directory here, see load()'s
+    docstring). Each entry is a column added after the table already
+    shipped; `ADD COLUMN IF NOT EXISTS` (supported since MariaDB 10.0.2,
+    which is well below the 10.11 this plugin targets) makes re-running
+    these on every boot a no-op once applied, and a brand-new install
+    creates the table with the column already present via create_all()
+    above, so these also no-op there.
+    """
+    stmts = [
+        "ALTER TABLE edo_challenge ADD COLUMN IF NOT EXISTS access_mode VARCHAR(8) NOT NULL DEFAULT 'vpn'",
+        "ALTER TABLE edo_instances ADD COLUMN IF NOT EXISTS published_ports VARCHAR(512)",
+    ]
+    for stmt in stmts:
+        db.session.execute(db.text(stmt))
+    db.session.commit()
+
+
 def _seed_defaults():
     defaults = {
         "max_containers_per_owner":   EdoConfig.DEFAULT_MAX_CONTAINERS_PER_OWNER,
@@ -96,6 +118,7 @@ def _seed_defaults():
         "submit_rate_limit":          EdoConfig.DEFAULT_SUBMIT_RATE_LIMIT,
         "submit_rate_window":         EdoConfig.DEFAULT_SUBMIT_RATE_WINDOW,
         "vpn_server_endpoint":        EdoConfig.DEFAULT_VPN_SERVER_ENDPOINT,
+        "public_ip":                  EdoConfig.DEFAULT_PUBLIC_IP,
         "reconcile_interval_seconds": EdoConfig.DEFAULT_RECONCILE_INTERVAL_SECONDS,
         "ttl_check_interval_seconds": EdoConfig.DEFAULT_TTL_CHECK_INTERVAL_SECONDS,
     }

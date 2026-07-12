@@ -61,6 +61,20 @@
     fill in here.
   </small>
 </div>
+<div class="form-group">
+  <label>Access Mode</label>
+  <select class="form-control" name="access_mode">
+    <option value="vpn" {% if challenge.access_mode != "public" %}selected{% endif %}>VPN subnet (default)</option>
+    <option value="public" {% if challenge.access_mode == "public" %}selected{% endif %}>Server public IP</option>
+  </select>
+  <small class="form-text text-muted">
+    VPN subnet: participants connect to their own container's isolated IP
+    over WireGuard, no host port ever published. Server public IP: the
+    daemon instead publishes a real host port per owner and participants
+    connect directly to this server's public IP, no VPN needed — typical
+    for web challenges.
+  </small>
+</div>
 <div class="form-row">
   <div class="form-group col-md-4">
     <label>CPU limit</label>
