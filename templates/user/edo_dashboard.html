@@ -51,8 +51,11 @@
 
   // Same rules as the challenge modal (view.js): access_mode="public" uses
   // the server's public IP + the real published host port; "vpn" (default)
-  // uses the container's own routed IP + the port it EXPOSEs. B2R never
-  // shows a port at all.
+  // uses the container's own routed IP + the port it EXPOSEs. B2R hides
+  // the port, but only in "vpn" mode — there, the host IP alone already
+  // identifies this specific instance. In "public" mode every owner
+  // shares the same server IP, so the port is the only thing that points
+  // at this instance rather than the whole host; it can't be hidden.
   function addressText(inst) {
     let host, port;
     if (inst.access_mode === "public") {
@@ -65,7 +68,7 @@
       const ports = parseJson(inst.host_ports, []);
       port = ports.length ? ports[0].split("/")[0] : null;
     }
-    if (inst.category === "B2R" || port == null) return host;
+    if ((inst.category === "B2R" && inst.access_mode !== "public") || port == null) return host;
     return `${host}:${port}`;
   }
 

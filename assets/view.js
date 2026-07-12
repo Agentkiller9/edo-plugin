@@ -190,7 +190,12 @@ function initEdoChallenge(chalId) {
   var publicIp = null;
 
   // Category-based display rule: B2R challenges show just the host, no
-  // port — everything else shows host:port as usual.
+  // port. That only makes sense in "vpn" mode, though — there, the host
+  // IS the instance (each owner gets their own routed IP, so the address
+  // alone already identifies it). In "public" mode every owner shares the
+  // same server IP; the port is the ONLY thing that points at this
+  // specific instance rather than the whole host, so it can't be hidden
+  // regardless of category.
   function endpointText(inst) {
     var host, port;
     if (accessMode === "public") {
@@ -200,7 +205,7 @@ function initEdoChallenge(chalId) {
       host = inst.assigned_ip || "?";
       port = firstExposedPort(inst);
     }
-    if (category === "B2R" || port == null) {
+    if ((category === "B2R" && accessMode !== "public") || port == null) {
       return host;
     }
     return `${host}:${port}`;
