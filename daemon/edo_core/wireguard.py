@@ -307,7 +307,11 @@ def _render_client_config(peer: Peer, server: ServerConfig) -> str:
         "DNS = 1.1.1.1\n\n"
         "[Peer]\n"
         f"PublicKey = {server.public_key}\n"
-        f"Endpoint = {server.endpoint}:{server.listen_port}\n"
+        # server.endpoint is EDO_VPN_ENDPOINT, documented and configured as
+        # the FULL "host:port" string (see daemon.env.example) — do not
+        # append listen_port again here, or the rendered config ends up
+        # with the port duplicated ("host:51820:51820").
+        f"Endpoint = {server.endpoint}\n"
         f"AllowedIPs = {WG_SUBNET}, {DOCKER_POOL}\n"
         "PersistentKeepalive = 25\n"
     )
