@@ -99,6 +99,23 @@
   <div id="edo-flag-warning" class="text-warning small mt-2"></div>
 </div>
 
+<hr>
+<h5>Owner Progress</h5>
+<p class="text-muted small">
+  Who has found which flags on this challenge. Deleting a solve from the
+  Teams/Users admin pages only removes CTFd's scoreboard entry — it does
+  <strong>not</strong> clear which flags they've found here, so their flag
+  boxes would still show everything solved. Use <strong>Reset</strong>
+  below to actually clear an owner's progress on this challenge.
+</p>
+<div id="edo-progress-editor" data-challenge-id="{{ challenge.id }}">
+  <table class="table table-sm">
+    <thead><tr><th>Owner</th><th>Flags found</th><th></th></tr></thead>
+    <tbody id="edo-progress-list"></tbody>
+  </table>
+  <button type="button" id="edo-progress-refresh" class="btn btn-sm btn-secondary">Refresh</button>
+</div>
+
 <script>
 (function () {
   const mode = document.getElementById("edo-scoring-mode");
@@ -164,6 +181,40 @@
   });
 
   load();
+
+  const progBox  = document.getElementById("edo-progress-editor");
+  const progList = document.getElementById("edo-progress-list");
+
+  function progRow(o) {
+    return `
+      <tr data-owner-type="${o.owner_type}" data-owner-id="${o.owner_id}">
+        <td>${o.owner_name} <span class="text-muted">(${o.owner_type})</span></td>
+        <td>${o.flags_solved}/${o.flags_total}</td>
+        <td><button type="button" class="btn btn-sm btn-danger edo-progress-reset">Reset</button></td>
+      </tr>`;
+  }
+
+  async function loadProgress() {
+    const res = await CTFd.fetch(`/plugins/edo_plugin/admin/challenges/${chal}/owner_progress`);
+    const j = await res.json();
+    progList.innerHTML = (j.owners || []).map(progRow).join("") ||
+      '<tr><td colspan="3" class="text-muted">Nobody has found a flag yet.</td></tr>';
+  }
+
+  document.getElementById("edo-progress-refresh").onclick = loadProgress;
+
+  progList.addEventListener("click", async (ev) => {
+    if (!ev.target.classList.contains("edo-progress-reset")) return;
+    const row = ev.target.closest("[data-owner-type]");
+    if (!confirm(`Reset all progress on this challenge for ${row.cells[0].textContent.trim()}?`)) return;
+    await CTFd.fetch(
+      `/plugins/edo_plugin/admin/challenges/${chal}/owners/${row.dataset.ownerType}/${row.dataset.ownerId}/reset`,
+      { method: "POST" },
+    );
+    loadProgress();
+  });
+
+  loadProgress();
 })();
 </script>
 {% endblock %}

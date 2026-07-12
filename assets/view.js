@@ -81,9 +81,12 @@ function initEdoChallenge(chalId) {
     _edoInstanceTimer = null;
   }
 
-  function showAlert(ok, message) {
+  // style: "success" | "danger" | "info" — "info" is for a resubmission of
+  // a flag already credited: still visually distinct from a genuine new
+  // find (green), so it doesn't read as "yep, that counted again."
+  function showAlert(style, message) {
     alertBox.textContent = message;
-    alertBox.className = "alert text-center w-100 " + (ok ? "alert-success" : "alert-danger");
+    alertBox.className = "alert text-center w-100 alert-" + style;
     alertBox.style.display = "";
   }
 
@@ -127,15 +130,15 @@ function initEdoChallenge(chalId) {
       });
       var j = await res.json();
       if (!j.success) {
-        showAlert(false, j.error === "rate_limited"
+        showAlert("danger", j.error === "rate_limited"
           ? `Too many attempts — try again in ${j.retry_after}s`
           : j.error === "attempts_exhausted"
           ? "No attempts remaining."
           : (j.error || "Something went wrong."));
         return;
       }
-      showAlert(j.correct, j.message);
-      if (j.correct) {
+      showAlert(j.already_found ? "info" : (j.correct ? "success" : "danger"), j.message);
+      if (j.correct && !j.already_found) {
         refreshProgress();  // re-renders boxes, collapsing this one to a checkmark
       }
     } finally {

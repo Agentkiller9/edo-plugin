@@ -11,12 +11,13 @@ import json
 import logging
 
 from flask import Blueprint, jsonify, render_template, request
-from CTFd.models import Flags, Users, db
+from CTFd.cache import clear_challenges, clear_standings
+from CTFd.models import Flags, Solves, Users, db
 from CTFd.utils.decorators import admins_only
 
 from ..config import EdoConfig
 from ..daemon_client import DaemonError, EdoDaemonClient
-from ..models import EdoAuditLog, EdoFlagWeight, EdoInstance, EdoPeer, EdoSettings
+from ..models import EdoAuditLog, EdoFlagSolve, EdoFlagWeight, EdoInstance, EdoPeer, EdoSettings
 from ..owner import owner_display_name, resolve_owner_for_user
 
 logger = logging.getLogger("edo.api.admin")
@@ -136,6 +137,69 @@ def _flag_weights_sum_to_100(challenge_id: int) -> bool:
         EdoFlagWeight.flag_id.in_(flag_ids)
     ).count()
     return int(total) + 100 * unset == 100
+
+
+# ---------- Owner progress ----------
+# CTFd's native "delete solve" admin action (Teams/Users detail pages,
+# DELETE /api/v1/submissions/<id>) only removes the Submissions/Solves row
+# — there's no plugin hook CTFd calls when that happens, so it can never
+# know to also clear EdoFlagSolve, our own per-flag progress tracking.
+# Left alone, that orphans EdoFlagSolve rows: the participant's flag boxes
+# and progress percentage keep showing fully solved even after an admin
+# "deletes" the solve. These routes are the supported way to actually
+# reset an owner's progress on an edo challenge — they clear both tables
+# together.
+
+@admin_bp.route("/challenges/<int:challenge_id>/owner_progress", methods=["GET"])
+@admins_only
+def list_owner_progress(challenge_id: int):
+    total_flags = Flags.query.filter_by(challenge_id=challenge_id).count()
+    rows = EdoFlagSolve.query.filter_by(challenge_id=challenge_id).all()
+    by_owner: dict[tuple, int] = {}
+    for r in rows:
+        key = (r.owner_type, r.owner_id)
+        by_owner[key] = by_owner.get(key, 0) + 1
+    return jsonify(success=True, owners=[
+        {
+            "owner_type": ot,
+            "owner_id": oid,
+            "owner_name": owner_display_name(ot, oid),
+            "flags_solved": count,
+            "flags_total": total_flags,
+        }
+        for (ot, oid), count in sorted(by_owner.items())
+    ])
+
+
+@admin_bp.route(
+    "/challenges/<int:challenge_id>/owners/<owner_type>/<int:owner_id>/reset",
+    methods=["POST"],
+)
+@admins_only
+def reset_owner_progress(challenge_id: int, owner_type: str, owner_id: int):
+    """Clear one owner's progress on one edo challenge — both EdoFlagSolve
+    (our per-flag tracking) and CTFd's own Solves row, so the participant
+    genuinely goes back to "not solved" instead of just losing scoreboard
+    points while their flag boxes still show everything found."""
+    if owner_type not in ("user", "team"):
+        return jsonify(success=False, error="invalid_owner_type"), 400
+
+    EdoFlagSolve.query.filter_by(
+        challenge_id=challenge_id, owner_type=owner_type, owner_id=owner_id
+    ).delete(synchronize_session=False)
+    Solves.query.filter_by(
+        challenge_id=challenge_id,
+        **({"team_id": owner_id} if owner_type == "team" else {"user_id": owner_id}),
+    ).delete(synchronize_session=False)
+    db.session.add(EdoAuditLog(
+        actor="admin", event="reset_owner_progress", challenge_id=challenge_id,
+        details=json.dumps({"owner_type": owner_type, "owner_id": owner_id}),
+    ))
+    db.session.commit()
+
+    clear_standings()
+    clear_challenges()
+    return jsonify(success=True)
 
 
 # ---------- Containers ----------

@@ -334,7 +334,7 @@ def submit_flag(challenge_id: int):
     if already_found is not None:
         progress = owner_progress(challenge_id, owner_type, owner_id)
         return jsonify(
-            success=True, correct=True,
+            success=True, correct=True, already_found=True,
             complete=progress["flags_solved"] >= progress["flags_total"],
             message="You already found this flag.",
             **progress,
