@@ -34,8 +34,17 @@ ProtectSystem=strict
 # wireguard-tools is installed, and /run/edo/ is created by the daemon itself.
 ReadWritePaths=-/run/edo -/var/lib/edo -/etc/wireguard
 # The daemon creates its own runtime directory with the right ownership.
+# RuntimeDirectoryPreserve=restart is critical: without it, systemd deletes
+# and recreates /run/edo as a NEW directory on every restart (deploys,
+# crash-recovery, manual restarts). Docker's bind mount of /run/edo into
+# the CTFd container is anchored to the directory INSTANCE that existed
+# when the container started — a fresh instance orphans that mount, and
+# the socket silently vanishes from inside the container until the CTFd
+# container is also recreated. `restart` preserves the directory across
+# Stop+Start cycles (still cleaned up on a genuine `systemctl stop`).
 RuntimeDirectory=edo
 RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=restart
 ProtectHome=yes
 PrivateTmp=yes
 
