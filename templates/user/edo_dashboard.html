@@ -70,6 +70,7 @@
   }
 
   function card(inst) {
+    const target = addressText(inst);
     return `
       <div class="col-md-6 mb-3">
         <div class="card">
@@ -79,7 +80,11 @@
               <span class="badge badge-secondary">${inst.status}</span>
             </h5>
             <p class="card-text">
-              <strong>Address:</strong> ${addressText(inst)}
+              <strong>Target:</strong> ${target}
+              <button type="button" class="btn btn-sm btn-outline-secondary edo-copy-target"
+                      data-target="${target}" title="Copy target">
+                <i class="fa-solid fa-copy"></i>
+              </button>
               <br>
               <strong>Expires in:</strong>
               <span class="edo-countdown" data-remaining="${inst.remaining_seconds}">
@@ -134,6 +139,18 @@
 
   document.addEventListener("click", async (ev) => {
     const t = ev.target;
+    const copyBtn = t.closest(".edo-copy-target");
+    if (copyBtn) {
+      try {
+        await navigator.clipboard.writeText(copyBtn.dataset.target);
+        const original = copyBtn.innerHTML;
+        copyBtn.innerHTML = '<i class="fa-solid fa-check"></i>';
+        setTimeout(() => { copyBtn.innerHTML = original; }, 1200);
+      } catch (err) {
+        // Clipboard API unavailable — nothing reasonable to fall back to.
+      }
+      return;
+    }
     if (t.classList.contains("edo-teardown")) {
       if (!confirm("Stop this instance?")) return;
       await CTFd.fetch(`/plugins/edo_plugin/instances/${t.dataset.id}`, { method: "DELETE" });

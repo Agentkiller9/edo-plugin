@@ -165,6 +165,23 @@ function initEdoChallenge(chalId) {
   var stop = panel.querySelector(".edo-stop");
   var extend = panel.querySelector(".edo-extend");
 
+  // Event delegation — the copy button gets recreated every tick() (the
+  // countdown re-renders status.innerHTML every second), so a listener
+  // bound directly to it would go stale after the very first tick.
+  panel.addEventListener("click", async function (e) {
+    var btn = e.target.closest(".edo-copy-target");
+    if (!btn) return;
+    try {
+      await navigator.clipboard.writeText(btn.dataset.target);
+      var original = btn.innerHTML;
+      btn.innerHTML = '<i class="fa-solid fa-check"></i>';
+      setTimeout(function () { btn.innerHTML = original; }, 1200);
+    } catch (err) {
+      // Clipboard API unavailable (e.g. insecure context) — nothing
+      // reasonable to fall back to here, fail silently.
+    }
+  });
+
   var challengeData = CTFd._internal.challenge.data || {};
   var category = challengeData.category || "";
   var accessMode = challengeData.access_mode || "vpn";
@@ -231,9 +248,12 @@ function initEdoChallenge(chalId) {
     function tick() {
       var m = String(Math.floor(remaining / 60)).padStart(2, "0");
       var s = String(remaining % 60).padStart(2, "0");
+      var target = endpointText(inst);
       status.innerHTML =
-        `Endpoint <code>${endpointText(inst)}</code> · `
-        + `${m}:${s} remaining`;
+        `Target <code>${target}</code> `
+        + `<button type="button" class="btn btn-sm btn-outline-secondary edo-copy-target" `
+        + `data-target="${target}" title="Copy target"><i class="fa-solid fa-copy"></i></button>`
+        + ` · ${m}:${s} remaining`;
       remaining--;
       if (remaining < 0) refresh();
     }
