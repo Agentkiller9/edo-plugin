@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="jumbotron">
+  <div class="container">
+    <h1>VPN</h1>
+    <p class="lead">
+      Download your WireGuard config to reach challenge containers.
+    </p>
+  </div>
+</div>
+
+<div class="container">
+  <div class="row mb-4">
+    <div class="col-md-8">
+      <p class="text-muted mb-1">
+        Your config is personal — don't share it. It's generated the first
+        time you download it, and reused after that.
+      </p>
+    </div>
+    <div class="col-md-4 text-right">
+      <a href="/plugins/edo_plugin/vpn/config" class="btn btn-primary btn-lg">
+        Download my VPN config
+      </a>
+    </div>
+  </div>
+
+  <hr>
+
+  <ul class="nav nav-tabs" id="edo-vpn-guide-tabs" role="tablist">
+    <li class="nav-item">
+      <a class="nav-link active" id="edo-tab-windows" data-bs-toggle="tab" href="#edo-guide-windows"
+         role="tab" aria-controls="edo-guide-windows" aria-selected="true">Windows</a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link" id="edo-tab-linux" data-bs-toggle="tab" href="#edo-guide-linux"
+         role="tab" aria-controls="edo-guide-linux" aria-selected="false">Linux</a>
+    </li>
+  </ul>
+
+  <div class="tab-content mt-3" id="edo-vpn-guide-content">
+    <div class="tab-pane fade show active" id="edo-guide-windows" role="tabpanel" aria-labelledby="edo-tab-windows">
+      <h4>Connecting on Windows</h4>
+      <ol>
+        <li>
+          Download and install the official WireGuard client from
+          <a href="https://www.wireguard.com/install/" target="_blank" rel="noopener">wireguard.com/install</a>.
+        </li>
+        <li>Click <strong>Download my VPN config</strong> above and save the <code>.conf</code> file somewhere you can find it.</li>
+        <li>Open the WireGuard app, click <strong>Import tunnel(s) from file</strong>, and select the <code>.conf</code> file you downloaded.</li>
+        <li>Select the imported tunnel in the list and click <strong>Activate</strong>.</li>
+        <li>You're connected — challenge containers are now reachable at the addresses shown on each challenge's instance panel.</li>
+      </ol>
+      <p class="text-muted small">
+        To disconnect, open WireGuard and click <strong>Deactivate</strong> on the tunnel.
+      </p>
+    </div>
+
+    <div class="tab-pane fade" id="edo-guide-linux" role="tabpanel" aria-labelledby="edo-tab-linux">
+      <h4>Connecting on Linux</h4>
+      <p>Install <code>wireguard-tools</code> for your distro, for example:</p>
+      <pre><code>sudo apt install wireguard      # Debian / Ubuntu
+sudo dnf install wireguard-tools    # Fedora
+sudo pacman -S wireguard-tools      # Arch</code></pre>
+      <p>Click <strong>Download my VPN config</strong> above, then bring the tunnel up with <code>wg-quick</code>:</p>
+      <pre><code>sudo mv ~/Downloads/*.conf /etc/wireguard/wg0.conf
+sudo wg-quick up wg0</code></pre>
+      <p>Check it's up:</p>
+      <pre><code>sudo wg show</code></pre>
+      <p>To disconnect:</p>
+      <pre><code>sudo wg-quick down wg0</code></pre>
+      <p class="text-muted small">
+        Prefer a GUI? Most desktop environments can import the file directly —
+        in GNOME/KDE network settings, add a new connection and choose
+        <strong>Import from file</strong> (WireGuard), or run
+        <code>nmcli connection import type wireguard file your-config.conf</code>
+        if you use NetworkManager from the terminal.
+      </p>
+    </div>
+  </div>
+</div>
+{% endblock %}

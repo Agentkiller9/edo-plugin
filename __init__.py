@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import os
 
-from CTFd.plugins import register_plugin_assets_directory
+from CTFd.plugins import register_plugin_assets_directory, register_user_page_menu_bar
 from CTFd.plugins.challenges import CHALLENGE_CLASSES
 
 from .api import edo_bp
@@ -62,6 +62,16 @@ def load(app):
     register_plugin_assets_directory(
         app, base_path="/plugins/edo_plugin/assets/"
     )
+
+    # Nav bar link to the VPN page. register_user_page_menu_bar builds its
+    # href via url_for("views.static_html", route=...), whose URL rule is
+    # just `/<path:route>` — so this resolves to the plain path
+    # "/plugins/edo_plugin/vpn" at render time. That path is also a real
+    # route on our own blueprint (registered above), and Werkzeug always
+    # prefers a specific static-segment match over the catch-all
+    # `<path:route>` Pages view, so it's our page that actually serves it,
+    # not CTFd's Pages system.
+    register_user_page_menu_bar(title="VPN", route="plugins/edo_plugin/vpn")
 
     # 5. Seed defaults on first boot. Idempotent — never clobbers admin edits.
     with app.app_context():

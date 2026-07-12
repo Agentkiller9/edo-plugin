@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 
 from flask import Blueprint, Response, jsonify, render_template, request
@@ -231,6 +232,12 @@ def extend_instance(instance_id: int):
 
 # ---------- WireGuard ----------
 
+@user_bp.route("/vpn", methods=["GET"])
+@authed_only
+def vpn_page():
+    return render_template("user/edo_vpn.html")
+
+
 @user_bp.route("/vpn/config", methods=["GET"])
 @authed_only
 @owner_required
@@ -266,8 +273,10 @@ def download_wg_config():
     except DaemonError as e:
         return jsonify(success=False, error="daemon_error", detail=str(e)), 502
 
+    username = Users.query.get(user_id).name
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", username) or f"user-{user_id}"
     resp = Response(blob, mimetype="text/plain")
-    resp.headers["Content-Disposition"] = f'attachment; filename="edo-user-{user_id}.conf"'
+    resp.headers["Content-Disposition"] = f'attachment; filename="{safe_name}.conf"'
     return resp
 
 
