@@ -25,11 +25,11 @@ _BUCKETS: dict[tuple, deque[float]] = defaultdict(deque)
 
 def check_rate_limit(key: tuple, limit: int, window: int) -> Tuple[bool, int]:
     """
-    Returns (allowed, retry_after_seconds). Called directly from
-    EdoChallengeType.attempt() so the limit is enforced no matter which
-    endpoint a submission comes through (CTFd's native
-    /api/v1/challenges/attempt calls attempt() itself — there's no
-    separate custom submission route to gate anymore).
+    Returns (allowed, retry_after_seconds). Called from the primary flag
+    submission route (api/user.py's submit_flag) — CTFd 3.7.5's native
+    /api/v1/challenges/attempt has its own separate kpm-based limiter
+    (incorrect_submissions_per_min) that only applies to that path, so it
+    doesn't cover the custom /submit route this plugin actually uses.
     """
     now = time.monotonic()
     cutoff = now - window

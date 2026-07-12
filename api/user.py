@@ -6,8 +6,11 @@ Every mutating route enforces:
     - global per-owner container cap
     - one-container-per-(challenge, owner) uniqueness (DB unique constraint)
 
-Flag submission has no route here at all — see the note near the bottom of
-this file for why.
+Flag submission (submit_flag, below) is the PRIMARY path for edo challenges
+— not CTFd's native /api/v1/challenges/attempt. See the docstring on
+EdoChallengeType's attempt()/solve() in challenge_type.py for why: CTFd
+3.7.5 has no "partial credit" concept, so multi-flag progress has to be
+owned entirely by this route instead of CTFd's native dispatcher.
 """
 from __future__ import annotations
 
@@ -16,13 +19,13 @@ import logging
 from datetime import datetime, timedelta
 
 from flask import Blueprint, Response, jsonify, render_template, request
-from CTFd.models import db
+from CTFd.models import Fails, Teams, Users, db
 from CTFd.utils.decorators import authed_only
 
 from ..config import EdoConfig
 from ..daemon_client import DaemonError, EdoDaemonClient
-from ..decorators import owner_required
-from ..models import EdoAuditLog, EdoChallenge, EdoInstance, EdoPeer, EdoSettings
+from ..decorators import check_rate_limit, owner_required
+from ..models import EdoAuditLog, EdoChallenge, EdoFlagSolve, EdoInstance, EdoPeer, EdoSettings
 from ..owner import current_user_id, resolve_owner
 
 logger = logging.getLogger("edo.api.user")
@@ -268,13 +271,87 @@ def download_wg_config():
     return resp
 
 
-# Flag submission has no custom route: CTFd's native
-# /api/v1/challenges/attempt already dispatches directly to
-# EdoChallengeType.attempt()/.solve() for any "edo"-type challenge, and
-# view.html/view.js use CTFd's own native flag input + submit button
-# (extending challenge.html) rather than a duplicate custom form. The rate
-# limit lives inside attempt() itself (see challenge_type.py) so it's
-# enforced regardless of entry point.
+# ---------- Flag submission ----------
+
+@user_bp.route("/challenges/<int:challenge_id>/submit", methods=["POST"])
+@authed_only
+@owner_required
+def submit_flag(challenge_id: int):
+    """
+    Primary submission path for edo challenges (see module docstring for
+    why this exists instead of using CTFd's native attempt endpoint).
+
+    Every correct-but-incomplete flag is recorded as real progress
+    (EdoFlagSolve) immediately — nothing here waits for the set to
+    complete before crediting an individual flag find. Only the final,
+    set-completing flag also inserts CTFd's own Solves row, which is what
+    actually awards scoreboard points.
+    """
+    owner_type, owner_id = resolve_owner()
+    challenge = EdoChallenge.query.get(challenge_id)
+    if challenge is None:
+        return jsonify(success=False, error="challenge_not_found"), 404
+
+    limit = _setting("submit_rate_limit", EdoConfig.DEFAULT_SUBMIT_RATE_LIMIT)
+    window = _setting("submit_rate_window", EdoConfig.DEFAULT_SUBMIT_RATE_WINDOW)
+    allowed, retry_after = check_rate_limit(
+        (owner_type, owner_id, "submit", challenge_id), limit, window
+    )
+    if not allowed:
+        return jsonify(
+            success=False, error="rate_limited", retry_after=retry_after
+        ), 429
+
+    user = Users.query.get(current_user_id())
+    team = Teams.query.get(owner_id) if owner_type == "team" else None
+    owner_filter = {"team_id": owner_id} if team else {"user_id": owner_id}
+
+    if challenge.max_attempts:
+        fail_count = Fails.query.filter_by(challenge_id=challenge_id, **owner_filter).count()
+        if fail_count >= challenge.max_attempts:
+            return jsonify(success=False, error="attempts_exhausted"), 403
+
+    data = request.get_json(silent=True) or request.form or {}
+    submission = (data.get("submission") or "").strip()
+    if not submission:
+        return jsonify(success=False, error="empty_submission"), 400
+
+    from ..challenge_type import (
+        _first_matching_flag, _insert_ctfd_fail, _insert_ctfd_solve,
+        owner_progress, record_flag_find,
+    )
+
+    ip = request.access_route[0] if request.access_route else request.remote_addr
+
+    flag = _first_matching_flag(challenge_id, submission)
+    if flag is None:
+        _insert_ctfd_fail(challenge, user, team, submission, ip=ip)
+        return jsonify(success=True, correct=False, message="Incorrect")
+
+    already_found = EdoFlagSolve.query.filter_by(
+        owner_type=owner_type, owner_id=owner_id, flag_id=flag.id
+    ).first()
+    if already_found is not None:
+        progress = owner_progress(challenge_id, owner_type, owner_id)
+        return jsonify(
+            success=True, correct=True,
+            complete=progress["flags_solved"] >= progress["flags_total"],
+            message="You already found this flag.",
+            **progress,
+        )
+
+    record_flag_find(challenge_id, user, team, submission)
+    progress = owner_progress(challenge_id, owner_type, owner_id)
+
+    complete = progress["flags_solved"] >= progress["flags_total"]
+    if complete:
+        _insert_ctfd_solve(challenge, user, team, submission, ip=ip)
+        message = "Correct! Challenge complete."
+    else:
+        remaining = progress["flags_total"] - progress["flags_solved"]
+        message = f"Correct! {remaining} flag(s) remaining."
+
+    return jsonify(success=True, correct=True, complete=complete, message=message, **progress)
 
 
 # ---------- helpers ----------

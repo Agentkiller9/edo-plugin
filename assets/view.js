@@ -1,16 +1,24 @@
 /**
- * Matches CTFd's real dynamic_challenges/assets/view.js pattern almost
- * exactly. CTFd._internal.challenge.{data,renderer,preRender,render,
- * postRender,submit} is a shared global the participant-facing challenge
- * modal's Alpine component (submitChallenge()) reads from — every
- * challenge type must set these (there's no usable default), unlike
- * create.js/update.js where this same object is NOT read at all.
+ * CTFd._internal.challenge.{data,renderer,preRender,render,postRender,
+ * submit} is a shared global every challenge type must set (there's no
+ * usable default) — unlike create.js/update.js where this object is not
+ * read at all.
  *
- * submit() posts straight to CTFd's own /api/v1/challenges/attempt, which
- * CTFd dispatches server-side to EdoChallengeType.attempt()/.solve() for
- * "edo"-type challenges — no custom endpoint needed. Rate limiting lives
- * inside attempt() itself (challenge_type.py) precisely so this default
- * native path enforces it too.
+ * The normal participant flag-submission UI in view.html no longer calls
+ * submitChallenge()/this hook at all: it POSTs directly to
+ * /plugins/edo_plugin/challenges/<id>/submit (see view.html), because
+ * CTFd 3.7.5's native /api/v1/challenges/attempt has no partial-credit
+ * concept and can't represent multi-flag progress (see challenge_type.py's
+ * class docstring on EdoChallengeType.attempt()).
+ *
+ * `submit` below is kept only because CTFd's ADMIN "Preview challenge"
+ * feature (themes/admin/assets/js/challenges/challenge.js) renders this
+ * same view.html client-side via nunjucks and independently wires its own
+ * "#submit-key" button to call this exact hook — that path still needs a
+ * working native-endpoint submit function. EdoChallengeType.attempt() is
+ * written to be a safe fallback for exactly this case: it only ever
+ * returns truthy for the flag that completes the full set, never
+ * over-awards a partial find.
  */
 CTFd._internal.challenge.data = undefined;
 

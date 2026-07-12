@@ -1,17 +1,35 @@
 {#
   Extends CTFd's own core theme challenge.html (participant modal) instead
-  of rebuilding it — that base already provides the flag input, submit
-  button, hints, files, solves/submissions tabs, ratings, and the whole
-  Alpine-driven "Correct!"/"Incorrect" feedback flow (see view.js, which
-  wires CTFd._internal.challenge.submit to CTFd's own native
-  /api/v1/challenges/attempt). None of that needs to be rebuilt here.
+  of rebuilding it — that base already provides the modal chrome, hints,
+  files, solves tab, and layout. We override three blocks:
 
-  We only override `description`: difficulty badge + multi-flag progress
-  go before the challenge's own HTML, and the instance panel (spawn/stop/
-  extend + live countdown) goes after it — that part IS genuinely custom,
-  since CTFd has no native concept of per-owner containers.
+  - description: difficulty badge + multi-flag progress, then the
+    challenge's own HTML, then the instance panel (spawn/stop/extend +
+    live countdown) — genuinely custom, CTFd has no native concept of
+    per-owner containers.
+  - input/submit: PLAIN elements, deliberately NOT wired to Alpine's
+    x-model="submission"/submitChallenge(). CTFd 3.7.5's native
+    /api/v1/challenges/attempt has no partial-credit concept, so
+    multi-flag progress can't go through it (see challenge_type.py's
+    class docstring on EdoChallengeType.attempt()). Submissions here POST
+    directly to /plugins/edo_plugin/challenges/<id>/submit instead — see
+    view.js, which is now a no-op (nothing left for it to override).
 #}
 {% extends "challenge.html" %}
+
+{% block input %}
+<input id="challenge-id" class="challenge-id" type="hidden" value="{{ challenge.id }}">
+<input
+    id="edo-flag-input" class="form-control"
+    type="text" placeholder="{% trans %}Flag{% endtrans %}" autocomplete="off"
+>
+{% endblock %}
+
+{% block submit %}
+<button id="edo-flag-submit" type="button" class="btn btn-outline-secondary w-100 h-100">
+  {% trans %}Submit{% endtrans %}
+</button>
+{% endblock %}
 
 {% block description %}
 <span class="edo-difficulty edo-difficulty-{{ challenge.difficulty }}">
@@ -20,6 +38,10 @@
 <span id="edo-progress" class="text-muted small"></span>
 <br>
 {{ challenge.html }}
+
+<div id="edo-submit-row" class="mt-2">
+  <div id="edo-submit-alert" class="alert text-center w-100" style="display:none;"></div>
+</div>
 
 <div id="edo-instance-panel" data-challenge-id="{{ challenge.id }}" class="mt-3">
   <div class="edo-instance-status text-muted">Checking instance…</div>
@@ -30,6 +52,55 @@
 
 <script>
 (function () {
+  const chalId = {{ challenge.id }};
+  const flagInput  = document.getElementById("edo-flag-input");
+  const flagSubmit = document.getElementById("edo-flag-submit");
+  const alertBox   = document.getElementById("edo-submit-alert");
+
+  function showAlert(ok, message) {
+    alertBox.textContent = message;
+    alertBox.className = "alert text-center w-100 " + (ok ? "alert-success" : "alert-danger");
+    alertBox.style.display = "";
+  }
+
+  async function submitFlag() {
+    const submission = flagInput.value;
+    if (!submission) return;
+    flagSubmit.disabled = true;
+    let keepDisabled = false;
+    try {
+      const res = await CTFd.fetch(`/plugins/edo_plugin/challenges/${chalId}/submit`, {
+        method: "POST",
+        body: JSON.stringify({ submission }),
+      });
+      const j = await res.json();
+      if (!j.success) {
+        showAlert(false, j.error === "rate_limited"
+          ? `Too many attempts — try again in ${j.retry_after}s`
+          : j.error === "attempts_exhausted"
+          ? "No attempts remaining."
+          : (j.error || "Something went wrong."));
+        return;
+      }
+      showAlert(j.correct, j.message);
+      if (j.correct) {
+        flagInput.value = "";
+        refreshProgress();
+      }
+      if (j.complete) {
+        flagInput.disabled = true;
+        keepDisabled = true;
+      }
+    } finally {
+      flagSubmit.disabled = keepDisabled;
+    }
+  }
+
+  flagSubmit.onclick = submitFlag;
+  flagInput.addEventListener("keyup", (e) => {
+    if (e.key === "Enter") submitFlag();
+  });
+
   const panel = document.getElementById("edo-instance-panel");
   const chal  = panel.dataset.challengeId;
   const status = panel.querySelector(".edo-instance-status");
@@ -128,10 +199,11 @@
     return (j.instances || []).find(i => String(i.challenge_id) === String(chal));
   }
 
-  // A correct submission re-renders the whole modal via CTFd's own Alpine
-  // flow (getNextId()/response watchers in challenge.html), which tears
-  // down and reloads this script block — so a fixed one-shot refresh on
-  // load is sufficient; no submit-event hook needed here.
+  // Every time the modal opens, CTFd re-fetches and re-renders this whole
+  // template (see ChallengeBoard.loadChallenge in challenges.js), which
+  // re-runs this script block fresh — so a one-shot refresh on load is
+  // sufficient; submitFlag() above calls refreshProgress() again after
+  // every correct submission to keep the counter live without a reopen.
   refresh();
   refreshProgress();
 })();
