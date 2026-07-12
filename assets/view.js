@@ -69,6 +69,40 @@ CTFd._internal.challenge.submit = function (preview) {
 // detached DOM node forever.
 var _edoInstanceTimer = null;
 
+// navigator.clipboard (the modern async Clipboard API) only exists in a
+// "secure context" — HTTPS, or localhost. A CTFd instance deployed over
+// plain HTTP (common for a quick/self-hosted setup, no reverse-proxy TLS
+// yet) has navigator.clipboard as undefined entirely, so calling
+// .writeText on it throws immediately and the copy button does nothing,
+// silently. document.execCommand("copy") is deprecated but still works
+// everywhere regardless of secure context, so it's the fallback here —
+// try the modern API first, drop to the legacy one if it's unavailable
+// or rejects.
+async function edoCopyToClipboard(text) {
+  if (window.isSecureContext && navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (e) {
+      // fall through to the legacy method below
+    }
+  }
+  try {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    var ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) {
+    return false;
+  }
+}
+
 function initEdoChallenge(chalId) {
   var flagsContainer = document.getElementById("edo-flags-container");
   var alertBox = document.getElementById("edo-submit-alert");
@@ -171,15 +205,10 @@ function initEdoChallenge(chalId) {
   panel.addEventListener("click", async function (e) {
     var btn = e.target.closest(".edo-copy-target");
     if (!btn) return;
-    try {
-      await navigator.clipboard.writeText(btn.dataset.target);
-      var original = btn.innerHTML;
-      btn.innerHTML = '<i class="fa-solid fa-check"></i>';
-      setTimeout(function () { btn.innerHTML = original; }, 1200);
-    } catch (err) {
-      // Clipboard API unavailable (e.g. insecure context) — nothing
-      // reasonable to fall back to here, fail silently.
-    }
+    var ok = await edoCopyToClipboard(btn.dataset.target);
+    var original = btn.innerHTML;
+    btn.innerHTML = ok ? '<i class="fa-solid fa-check"></i>' : '<i class="fa-solid fa-xmark"></i>';
+    setTimeout(function () { btn.innerHTML = original; }, 1200);
   });
 
   var challengeData = CTFd._internal.challenge.data || {};

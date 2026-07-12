@@ -49,6 +49,37 @@
     }
   }
 
+  // navigator.clipboard (the async Clipboard API) only exists in a secure
+  // context — HTTPS, or localhost. A CTFd instance deployed over plain
+  // HTTP has it as undefined entirely, so calling .writeText throws
+  // immediately and the copy button does nothing, silently.
+  // document.execCommand("copy") is deprecated but still works regardless
+  // of secure context, so it's the fallback here.
+  async function copyToClipboard(text) {
+    if (window.isSecureContext && navigator.clipboard) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (e) {
+        // fall through to the legacy method below
+      }
+    }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
   // Same rules as the challenge modal (view.js): access_mode="public" uses
   // the server's public IP + the real published host port; "vpn" (default)
   // uses the container's own routed IP + the port it EXPOSEs. B2R hides
@@ -144,14 +175,10 @@
     const t = ev.target;
     const copyBtn = t.closest(".edo-copy-target");
     if (copyBtn) {
-      try {
-        await navigator.clipboard.writeText(copyBtn.dataset.target);
-        const original = copyBtn.innerHTML;
-        copyBtn.innerHTML = '<i class="fa-solid fa-check"></i>';
-        setTimeout(() => { copyBtn.innerHTML = original; }, 1200);
-      } catch (err) {
-        // Clipboard API unavailable — nothing reasonable to fall back to.
-      }
+      const ok = await copyToClipboard(copyBtn.dataset.target);
+      const original = copyBtn.innerHTML;
+      copyBtn.innerHTML = ok ? '<i class="fa-solid fa-check"></i>' : '<i class="fa-solid fa-xmark"></i>';
+      setTimeout(() => { copyBtn.innerHTML = original; }, 1200);
       return;
     }
     if (t.classList.contains("edo-teardown")) {
