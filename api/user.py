@@ -157,9 +157,17 @@ def spawn_instance(challenge_id: int):
             ttl_seconds=ttl,
         )
     except DaemonError as e:
-        inst.status = "error"
-        inst.error_message = str(e)
+        # Delete rather than mark "error": unlike a teardown failure (where
+        # a real container may still be running and worth an admin's
+        # attention), a spawn failure means nothing was ever created —
+        # there's no infrastructure state to investigate, only a row that
+        # would otherwise permanently occupy the UNIQUE constraint on
+        # (challenge_id, owner_type, owner_id) and block every retry.
+        # _audit() first so the failure is still visible in the audit log
+        # (EdoAuditLog.instance_id isn't a real FK, so it survives the
+        # delete below).
         _audit("user", "spawn_failed", inst, {"error": str(e)})
+        db.session.delete(inst)
         db.session.commit()
         return jsonify(success=False, error="daemon_error", detail=str(e)), 502
 

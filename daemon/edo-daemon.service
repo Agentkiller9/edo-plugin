@@ -46,6 +46,16 @@ RuntimeDirectory=edo
 RuntimeDirectoryMode=0755
 RuntimeDirectoryPreserve=restart
 ProtectHome=yes
+# ProtectHome=yes makes /home, /root, and /run/user entirely invisible to
+# the daemon (docs: "mostly equivalent to setting [them] in
+# InaccessiblePaths="). Consequence: every challenge's build_path MUST
+# live outside those three trees, or the daemon will report "no
+# Dockerfile" even though the file is genuinely there — e.g. /opt/... or
+# /srv/..., not anything under /root or /home. (ReadOnlyPaths= and
+# BindReadOnlyPaths= were both tried as exceptions for a path under
+# /root and neither actually worked against this InaccessiblePaths-style
+# masking on systemd 255 — verified via nsenter showing no submount ever
+# got created — so don't reach for those; move the content instead.)
 PrivateTmp=yes
 
 [Install]

@@ -39,7 +39,18 @@ services:
       # the daemon's /etc/edo/daemon.env on the host (both default to
       # /run/edo/edo.sock, so this is usually a no-op to keep in sync).
       - EDO_DAEMON_SOCKET=/run/edo/edo.sock
-      - EDO_DAEMON_TIMEOUT=30
+      # A first spawn of a challenge builds its image from scratch (no layer
+      # cache yet) — 30s is enough for a trivial Dockerfile but not for a
+      # heavier one (multiple packages, services, etc). The daemon keeps
+      # working even if this RPC times out client-side (confirmed: a build
+      # that outlived a 30s timeout still finished and the container came
+      # up), but the participant gets a scary "daemon_error" for a spawn
+      # that actually succeeded, and CTFd's own EdoInstance row for it gets
+      # deleted (see spawn_instance()'s DaemonError handling in
+      # api/user.py) until they retry. 180s covers realistic first-build
+      # times; later spawns of the same challenge reuse cached layers and
+      # return in a couple seconds regardless of this value.
+      - EDO_DAEMON_TIMEOUT=180
     volumes:
       - ./.data/CTFd/logs:/var/log/CTFd
       - ./.data/CTFd/uploads:/var/uploads

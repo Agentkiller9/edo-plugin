@@ -16,8 +16,12 @@ class EdoConfig:
     # EDO_SOCKET_PATH in the daemon's own environment (they're two different
     # processes/env spaces pointing at the same bind-mounted path).
     DAEMON_SOCKET_PATH = os.environ.get("EDO_DAEMON_SOCKET", "/run/edo/edo.sock")
-    # Per-RPC timeout in seconds. Docker spawns can be slow; keep generous.
-    DAEMON_RPC_TIMEOUT = int(os.environ.get("EDO_DAEMON_TIMEOUT", "30"))
+    # Per-RPC timeout in seconds. A first spawn of a challenge builds its
+    # image from scratch (no layer cache yet) — keep this generous enough
+    # to cover a real first build, not just a trivial test Dockerfile.
+    # Later spawns of the same challenge reuse cached layers and return in
+    # a couple seconds regardless of this value.
+    DAEMON_RPC_TIMEOUT = int(os.environ.get("EDO_DAEMON_TIMEOUT", "180"))
 
     # ---- Defaults for EdoSettings on first boot ----
     DEFAULT_MAX_CONTAINERS_PER_OWNER = 3
