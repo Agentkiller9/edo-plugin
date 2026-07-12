@@ -1,5 +1,6 @@
 """
-Small decorators used across the edo-plugin API surface.
+Small decorators + rate-limit primitive used across the edo-plugin API
+surface.
 """
 from __future__ import annotations
 
@@ -7,8 +8,9 @@ import time
 from collections import defaultdict, deque
 from functools import wraps
 from threading import Lock
+from typing import Tuple
 
-from flask import jsonify, request
+from flask import jsonify
 from CTFd.utils.user import get_current_user
 
 from .owner import resolve_owner
@@ -21,47 +23,25 @@ _LOCK = Lock()
 _BUCKETS: dict[tuple, deque[float]] = defaultdict(deque)
 
 
-def rate_limited(key_fn, limit: int, window: int):
+def check_rate_limit(key: tuple, limit: int, window: int) -> Tuple[bool, int]:
     """
-    Per-key rate limiter. `key_fn(request)` returns a tuple key.
-
-    Args:
-        key_fn: callable(request) -> hashable
-        limit:  max requests per window
-        window: window length in seconds
+    Returns (allowed, retry_after_seconds). Called directly from
+    EdoChallengeType.attempt() so the limit is enforced no matter which
+    endpoint a submission comes through (CTFd's native
+    /api/v1/challenges/attempt calls attempt() itself — there's no
+    separate custom submission route to gate anymore).
     """
-    def decorator(fn):
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            key = key_fn(request)
-            now = time.monotonic()
-            cutoff = now - window
-            with _LOCK:
-                bucket = _BUCKETS[key]
-                while bucket and bucket[0] < cutoff:
-                    bucket.popleft()
-                if len(bucket) >= limit:
-                    retry = int(window - (now - bucket[0])) + 1
-                    return (
-                        jsonify(
-                            success=False,
-                            error="rate_limited",
-                            retry_after=retry,
-                        ),
-                        429,
-                    )
-                bucket.append(now)
-            return fn(*args, **kwargs)
-        return wrapper
-    return decorator
-
-
-def submit_rate_key(_request):
-    """Key flag-submissions by (owner, challenge_id)."""
-    owner = resolve_owner() or ("user", 0)
-    body = _request.get_json(silent=True) or {}
-    chal = body.get("challenge_id") or _request.view_args.get("challenge_id")
-    return owner + ("chal", chal)
+    now = time.monotonic()
+    cutoff = now - window
+    with _LOCK:
+        bucket = _BUCKETS[key]
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if len(bucket) >= limit:
+            retry = int(window - (now - bucket[0])) + 1
+            return False, retry
+        bucket.append(now)
+    return True, 0
 
 
 def owner_required(fn):

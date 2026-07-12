@@ -5,7 +5,9 @@ Every mutating route enforces:
     - authenticated + owner resolvable (owner_required covers both)
     - global per-owner container cap
     - one-container-per-(challenge, owner) uniqueness (DB unique constraint)
-    - rate limits for flag submission (belt on top of daemon-side belt)
+
+Flag submission has no route here at all — see the note near the bottom of
+this file for why.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from CTFd.utils.decorators import authed_only
 
 from ..config import EdoConfig
 from ..daemon_client import DaemonError, EdoDaemonClient
-from ..decorators import owner_required, rate_limited, submit_rate_key
+from ..decorators import owner_required
 from ..models import EdoAuditLog, EdoChallenge, EdoInstance, EdoPeer, EdoSettings
 from ..owner import current_user_id, resolve_owner
 
@@ -258,38 +260,13 @@ def download_wg_config():
     return resp
 
 
-# ---------- Flag submission (rate-limited) ----------
-
-@user_bp.route("/challenges/<int:challenge_id>/submit", methods=["POST"])
-@authed_only
-@owner_required
-@rate_limited(
-    submit_rate_key,
-    limit=EdoConfig.DEFAULT_SUBMIT_RATE_LIMIT,
-    window=EdoConfig.DEFAULT_SUBMIT_RATE_WINDOW,
-)
-def submit_flag(challenge_id: int):
-    """
-    Thin proxy that hands the submission to EdoChallengeType.attempt/solve
-    once we've rate-limited it. Keeping the endpoint here means the rate
-    limit lives in *our* code, not CTFd core — and it fires before CTFd's
-    cheaper checks so we don't burn cycles on abusers.
-    """
-    from ..challenge_type import EdoChallengeType
-    challenge = EdoChallenge.query.get(challenge_id)
-    if challenge is None:
-        return jsonify(success=False, error="challenge_not_found"), 404
-
-    correct, message = EdoChallengeType.attempt(challenge, request)
-    if not correct:
-        return jsonify(success=True, correct=False, message=message)
-
-    from CTFd.models import Teams, Users
-    owner_type, owner_id = resolve_owner()
-    user = Users.query.get(current_user_id())
-    team = Teams.query.get(owner_id) if owner_type == "team" else None
-    EdoChallengeType.solve(user, team, challenge, request)
-    return jsonify(success=True, correct=True, message=message)
+# Flag submission has no custom route: CTFd's native
+# /api/v1/challenges/attempt already dispatches directly to
+# EdoChallengeType.attempt()/.solve() for any "edo"-type challenge, and
+# view.html/view.js use CTFd's own native flag input + submit button
+# (extending challenge.html) rather than a duplicate custom form. The rate
+# limit lives inside attempt() itself (see challenge_type.py) so it's
+# enforced regardless of entry point.
 
 
 # ---------- helpers ----------

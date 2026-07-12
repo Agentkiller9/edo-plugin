@@ -1,38 +1,37 @@
-{# Public-facing challenge modal for type=edo. #}
-<div class="challenge-desc">
-  {{ challenge.html }}
-</div>
+{#
+  Extends CTFd's own core theme challenge.html (participant modal) instead
+  of rebuilding it — that base already provides the flag input, submit
+  button, hints, files, solves/submissions tabs, ratings, and the whole
+  Alpine-driven "Correct!"/"Incorrect" feedback flow (see view.js, which
+  wires CTFd._internal.challenge.submit to CTFd's own native
+  /api/v1/challenges/attempt). None of that needs to be rebuilt here.
 
-<div class="edo-meta">
-  <span class="edo-difficulty edo-difficulty-{{ challenge.difficulty }}">
-    {{ challenge.difficulty|replace('_', ' ')|title }}
-  </span>
-  <span class="edo-value">{{ challenge.value }} pts</span>
-  <span id="edo-progress" class="text-muted small"></span>
-</div>
+  We only override `description`: difficulty badge + multi-flag progress
+  go before the challenge's own HTML, and the instance panel (spawn/stop/
+  extend + live countdown) goes after it — that part IS genuinely custom,
+  since CTFd has no native concept of per-owner containers.
+#}
+{% extends "challenge.html" %}
 
-<div id="edo-instance-panel" data-challenge-id="{{ challenge.id }}">
+{% block description %}
+<span class="edo-difficulty edo-difficulty-{{ challenge.difficulty }}">
+  {{ challenge.difficulty|replace('_', ' ')|title }}
+</span>
+<span id="edo-progress" class="text-muted small"></span>
+<br>
+{{ challenge.html }}
+
+<div id="edo-instance-panel" data-challenge-id="{{ challenge.id }}" class="mt-3">
   <div class="edo-instance-status text-muted">Checking instance…</div>
-  <button class="btn btn-primary edo-spawn">Spawn instance</button>
-  <button class="btn btn-danger  edo-stop"  style="display:none;">Stop</button>
-  <button class="btn btn-warning edo-extend" style="display:none;" disabled>Extend</button>
+  <button class="btn btn-primary btn-sm edo-spawn">Spawn instance</button>
+  <button class="btn btn-danger  btn-sm edo-stop"  style="display:none;">Stop</button>
+  <button class="btn btn-warning btn-sm edo-extend" style="display:none;" disabled>Extend</button>
 </div>
-
-<form id="edo-submit-form" data-challenge-id="{{ challenge.id }}">
-  <div class="form-group">
-    <input type="text" name="submission" class="form-control"
-           placeholder="Flag..." autocomplete="off" required>
-  </div>
-  <button class="btn btn-success" type="submit">Submit</button>
-  <span class="edo-submit-feedback text-muted"></span>
-</form>
 
 <script>
 (function () {
   const panel = document.getElementById("edo-instance-panel");
   const chal  = panel.dataset.challengeId;
-  const form  = document.getElementById("edo-submit-form");
-  const fb    = form.querySelector(".edo-submit-feedback");
   const status = panel.querySelector(".edo-instance-status");
   const spawn  = panel.querySelector(".edo-spawn");
   const stop   = panel.querySelector(".edo-stop");
@@ -79,8 +78,6 @@
     timer = setInterval(tick, 1000);
   }
 
-  // CTFd.fetch (not the bare fetch()) auto-attaches the CSRF-Token header
-  // CTFd's global before_request hook requires on every POST/PATCH/DELETE.
   async function refresh() {
     const res = await CTFd.fetch("/plugins/edo_plugin/dashboard/data");
     if (!res.ok) return render(null);
@@ -130,21 +127,12 @@
     return (j.instances || []).find(i => String(i.challenge_id) === String(chal));
   }
 
-  form.addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    fb.textContent = "…";
-    const data = Object.fromEntries(new FormData(form).entries());
-    const res  = await CTFd.fetch(`/plugins/edo_plugin/challenges/${chal}/submit`, {
-      method: "POST", body: JSON.stringify(data),
-    });
-    if (res.status === 429) { fb.textContent = "Rate limited — slow down."; return; }
-    const j = await res.json();
-    fb.textContent = j.message || (j.correct ? "Correct" : "Incorrect");
-    fb.className = "edo-submit-feedback " + (j.correct ? "text-success" : "text-danger");
-    if (j.correct) refreshProgress();
-  });
-
+  // A correct submission re-renders the whole modal via CTFd's own Alpine
+  // flow (getNextId()/response watchers in challenge.html), which tears
+  // down and reloads this script block — so a fixed one-shot refresh on
+  // load is sufficient; no submit-event hook needed here.
   refresh();
   refreshProgress();
 })();
 </script>
+{% endblock %}

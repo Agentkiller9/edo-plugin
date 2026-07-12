@@ -1,17 +1,20 @@
-{# Rendered inside CTFd's admin "Create challenge" modal for type=edo. #}
-<div class="form-group">
-  <label>Name</label>
-  <input type="text" class="form-control" name="name" required>
-</div>
-<div class="form-group">
-  <label>Category</label>
-  <input type="text" class="form-control" name="category" required>
-</div>
-<div class="form-group">
-  <label>Description</label>
-  <textarea class="form-control" name="description" rows="4"></textarea>
-</div>
+{#
+  Extends CTFd's own admin create-challenge template rather than rebuilding
+  the whole modal. The base already provides Name/Category/Message
+  (description)/Attribution/State fields AND the actual <form> + Create
+  button (block `submit`) — none of that exists if this template doesn't
+  extend it, which is exactly why the Create button was missing.
 
+  Only two blocks need overriding:
+    - `value`: the base's single point-value input is replaced with our
+      difficulty/scoring/instance fields (same slot dynamic_challenges uses
+      for its own initial/decay/minimum fields).
+    - `type`: tags the new challenge as "edo" instead of the base's default
+      "standard".
+#}
+{% extends "admin/challenges/create.html" %}
+
+{% block value %}
 <div class="form-group">
   <label>Difficulty</label>
   <select class="form-control" name="difficulty">
@@ -32,7 +35,7 @@
 
 <div class="form-group edo-static-only">
   <label>Value</label>
-  <input type="number" class="form-control" name="value" value="100">
+  <input type="number" class="form-control" name="value" placeholder="Enter value" value="100">
 </div>
 
 <div class="edo-dynamic-only" style="display:none;">
@@ -102,3 +105,8 @@
   toggle();
 })();
 </script>
+{% endblock %}
+
+{% block type %}
+<input type="hidden" name="type" value="edo">
+{% endblock %}

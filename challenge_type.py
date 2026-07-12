@@ -51,7 +51,7 @@ class EdoChallengeType(BaseChallenge):
         challenge = EdoChallenge(**{
             k: v for k, v in data.items()
             if k in {
-                "name", "description", "category", "value",
+                "name", "description", "category", "value", "state", "attribution",
                 "difficulty", "scoring_mode",
                 "initial_value", "minimum_value", "decay",
                 "build_path", "exposed_ports",
@@ -100,6 +100,7 @@ class EdoChallengeType(BaseChallenge):
         data = request.form or request.get_json() or {}
         editable = {
             "name", "description", "category", "value", "state", "max_attempts",
+            "attribution", "connection_info", "position",
             "difficulty", "scoring_mode",
             "initial_value", "minimum_value", "decay",
             "build_path", "exposed_ports",
@@ -128,9 +129,31 @@ class EdoChallengeType(BaseChallenge):
         Try to solve one of the challenge's flags.
 
         Returns (correct, message). CTFd calls this from the
-        /api/v1/challenges/attempt pathway. We don't award points here —
-        CTFd's Solves table does that via the value returned by read().value.
+        /api/v1/challenges/attempt pathway — the ONLY entry point;
+        there's no separate custom submission route, so the rate-limit
+        check lives here rather than in a route decorator, guaranteeing
+        it fires regardless of which endpoint served the request. We
+        don't award points here — CTFd's Solves table does that via the
+        value returned by read().value.
         """
+        from .config import EdoConfig
+        from .decorators import check_rate_limit
+        from .models import EdoSettings
+        from .owner import resolve_owner
+
+        owner = resolve_owner()
+        if owner is not None:
+            limit = int(EdoSettings.get(
+                "submit_rate_limit", default=EdoConfig.DEFAULT_SUBMIT_RATE_LIMIT, cast=int
+            ) or EdoConfig.DEFAULT_SUBMIT_RATE_LIMIT)
+            window = int(EdoSettings.get(
+                "submit_rate_window", default=EdoConfig.DEFAULT_SUBMIT_RATE_WINDOW, cast=int
+            ) or EdoConfig.DEFAULT_SUBMIT_RATE_WINDOW)
+            key = owner + ("chal", challenge.id)
+            allowed, retry_after = check_rate_limit(key, limit, window)
+            if not allowed:
+                return False, f"Rate limited — try again in {retry_after}s"
+
         data = request.form or request.get_json() or {}
         submission = (data.get("submission") or "").strip()
         if not submission:
