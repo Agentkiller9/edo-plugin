@@ -146,11 +146,13 @@ container.
 
 ### 1. Daemon (host, root)
 
-Prereqs — the daemon shells out to `wg`, `docker`, and `iptables`:
+Prereqs — the daemon shells out to `wg`, `docker`, and `iptables`, and needs
+a venv because modern Debian/Ubuntu (PEP 668) refuse `pip install` into
+system Python:
 
 ```bash
 sudo apt update
-sudo apt install -y wireguard-tools docker.io iptables
+sudo apt install -y wireguard-tools docker.io iptables python3-venv
 ```
 
 `wireguard-tools` also creates `/etc/wireguard/` which the systemd unit
@@ -158,18 +160,19 @@ sandboxes into the service's namespace.
 
 The daemon imports its own `edo_core/` package as a sibling directory, so
 the whole `daemon/` folder ships together — not just `edo_daemon.py` on its
-own.
+own. Clone **directly into** `/opt/edo` so the paths the systemd unit
+expects (`/opt/edo/daemon/edo_daemon.py`, `/opt/edo/daemon/edo_core/`)
+already exist post-clone — no separate copy step needed.
 
 ```bash
-# Clone somewhere durable
 sudo mkdir -p /opt/edo && cd /opt/edo
 sudo git clone https://github.com/Agentkiller9/edo-plugin.git .
 
-# Install the whole daemon/ dir (edo_daemon.py + edo_core/) to where the
-# systemd unit expects it.
-sudo mkdir -p /opt/edo/daemon
-sudo cp -r daemon/edo_daemon.py daemon/edo_core /opt/edo/daemon/
-sudo pip install -r daemon/requirements.txt
+# Dedicated venv — the systemd unit's ExecStart points at its interpreter
+# directly, so `pip install` here is enough; no --break-system-packages,
+# no polluting system Python.
+sudo python3 -m venv /opt/edo/venv
+sudo /opt/edo/venv/bin/pip install -r daemon/requirements.txt
 
 sudo install -m 0644 daemon/edo-daemon.service  /etc/systemd/system/
 sudo install -d -m 0755 -o root -g root         /etc/edo /run/edo /var/lib/edo
@@ -181,16 +184,29 @@ sudo groupadd -g 1001 ctfd_socket
 
 sudo cp daemon/daemon.env.example /etc/edo/daemon.env
 sudo chmod 600 /etc/edo/daemon.env
-# Edit /etc/edo/daemon.env: confirm EDO_ALLOWED_UID matches the CTFd
-# container's user (docker compose exec ctfd id -u), and EDO_VPN_ENDPOINT
-# points at this host's public IP/hostname.
-$EDITOR /etc/edo/daemon.env
+
+# Fill in the two values that matter — EDO_ALLOWED_UID already defaults to
+# 1001 (the stock ctfd/ctfd image's UID; confirm with
+# `docker compose exec ctfd id -u` on the CTFd side once it's up) and
+# EDO_VPN_ENDPOINT needs this host's real public IP/hostname:
+sudo sed -i "s|^EDO_VPN_ENDPOINT=.*|EDO_VPN_ENDPOINT=$(curl -s ifconfig.me):51820|" /etc/edo/daemon.env
+# Or edit by hand if you'd rather (don't rely on $EDITOR being set on a
+# fresh box — check first, or just name the editor explicitly):
+#   sudo nano /etc/edo/daemon.env
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now edo-daemon.service
 
 # Sanity check — socket must be root:ctfd_socket 660
 ls -l /run/edo/edo.sock
+```
+
+If the socket doesn't appear, the daemon exited on startup — check why
+before moving on:
+
+```bash
+sudo systemctl status edo-daemon --no-pager -l
+sudo journalctl -u edo-daemon -n 50 --no-pager
 ```
 
 Authentication is kernel-level (`SO_PEERCRED`) rather than a shared secret —

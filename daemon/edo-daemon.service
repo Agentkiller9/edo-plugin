@@ -11,9 +11,12 @@ Group=root
 EnvironmentFile=/etc/edo/daemon.env
 # edo_daemon.py imports the edo_core/ package as a sibling directory, so the
 # whole daemon/ folder must be installed together — not just this one file.
-# See README: Installation, section 1.
+# ExecStart uses the venv's own interpreter (NOT /usr/bin/python3) because
+# modern Debian/Ubuntu block `pip install` into system Python (PEP 668) and
+# a plain venv is invisible to a root-owned systemd unit unless pointed at
+# directly. See README: Installation, section 1.
 WorkingDirectory=/opt/edo/daemon
-ExecStart=/usr/bin/python3 /opt/edo/daemon/edo_daemon.py
+ExecStart=/opt/edo/venv/bin/python3 /opt/edo/daemon/edo_daemon.py
 Restart=on-failure
 RestartSec=3
 # Give us just enough — we shell out to iptables/wg/docker so we need
