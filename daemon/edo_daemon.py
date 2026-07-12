@@ -155,7 +155,6 @@ def handle_container_ensure_instance(params: dict) -> dict:
             owner_id=int(params["owner_id"]),
             challenge_ref=str(params["challenge_ref"]),
             build_path=Path(params["build_path"]),
-            ports=params.get("ports"),
             security=profile,
             ttl_seconds=params.get("ttl_seconds"),
         )
@@ -167,7 +166,7 @@ def handle_container_ensure_instance(params: dict) -> dict:
         "container_id": inst.container_id,
         "container_name": inst.container_name,
         "assigned_ip": inst.assigned_ip,
-        "ports": json.loads(inst.ports) if inst.ports else {},
+        "ports": json.loads(inst.ports) if inst.ports else [],
         "expires_at": inst.expires_at,
         "status": inst.status,
     }
@@ -187,7 +186,7 @@ def handle_container_reconcile(_params: dict) -> dict:
             "container_id": i.container_id, "container_name": i.container_name,
             "owner_type": i.owner_type, "owner_id": i.owner_id,
             "challenge_ref": i.challenge_ref, "assigned_ip": i.assigned_ip,
-            "ports": json.loads(i.ports) if i.ports else {},
+            "ports": json.loads(i.ports) if i.ports else [],
             "status": i.status, "expires_at": i.expires_at,
         }
         for i in db.get_all_instances()
@@ -203,7 +202,7 @@ def handle_container_inspect(params: dict) -> dict:
                 "container_id": i.container_id, "container_name": i.container_name,
                 "owner_type": i.owner_type, "owner_id": i.owner_id,
                 "challenge_ref": i.challenge_ref, "assigned_ip": i.assigned_ip,
-                "ports": json.loads(i.ports) if i.ports else {},
+                "ports": json.loads(i.ports) if i.ports else [],
                 "status": i.status, "expires_at": i.expires_at,
             }
     raise KeyError(f"unknown container {container_id}")

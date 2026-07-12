@@ -144,7 +144,6 @@ def spawn_instance(challenge_id: int):
             owner_id=owner_id,
             challenge_ref=str(challenge_id),
             build_path=challenge.build_path,
-            exposed_ports=(challenge.exposed_ports or "").split(",") if challenge.exposed_ports else [],
             security={
                 "cpus": float(challenge.cpu_limit or 1.0),
                 "memory": f"{int(challenge.memory_limit_mb or 512)}m",
@@ -163,7 +162,7 @@ def spawn_instance(challenge_id: int):
     inst.container_id   = result.get("container_id")
     inst.container_name = result.get("container_name")
     inst.assigned_ip     = result.get("assigned_ip")
-    inst.host_ports      = json.dumps(result.get("ports") or {})
+    inst.host_ports      = json.dumps(result.get("ports") or [])
     inst.status          = "running"
     _audit("user", "spawn", inst)
     db.session.commit()

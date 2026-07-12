@@ -65,6 +65,7 @@ OWNER_TYPE_LABEL = "edo.owner_type"
 OWNER_ID_LABEL = "edo.owner_id"
 CHALLENGE_LABEL = "edo.challenge_ref"
 EXPIRES_LABEL = "edo.expires_at"
+PORTS_LABEL = "edo.ports"
 
 
 @dataclass
@@ -100,11 +101,17 @@ class SecurityProfile:
         return " ".join(bits)
 
 
-def _build_secure_host_config(
-    client: "docker.DockerClient",
-    profile: SecurityProfile,
-    port_bindings: Optional[dict] = None,
-) -> dict:
+def _build_secure_host_config(client: "docker.DockerClient", profile: SecurityProfile) -> dict:
+    """
+    Deliberately never sets port_bindings. Docker's host-port publishing
+    installs its own NAT/DNAT rules in the `nat` table's DOCKER chain,
+    which are evaluated on PREROUTING — *before* our EDO_FORWARD isolation
+    rules in the `filter` table ever see the packet. A published port would
+    be reachable from the entire public internet via <host-ip>:<port>,
+    completely bypassing per-owner VPN isolation. Participants only ever
+    reach a container via its own routed IP over the VPN (see
+    network.py); there is no legitimate reason to publish a host port here.
+    """
     kwargs: dict = {"restart_policy": {"Name": profile.restart_policy}}
     security_opt: List[str] = []
     if profile.no_new_privileges:
@@ -124,8 +131,6 @@ def _build_secure_host_config(
     if profile.read_only_rootfs:
         kwargs["read_only"] = True
         kwargs["tmpfs"] = {"/tmp": "rw,size=64m,exec"}
-    if port_bindings:
-        kwargs["port_bindings"] = port_bindings
     return client.api.create_host_config(**kwargs)
 
 
@@ -180,6 +185,22 @@ def image_tag_for(challenge_ref: str) -> str:
     """Images are built once and shared across owners — only the running
     container is owner-scoped, not the image."""
     return f"edo/{_slug(challenge_ref)}:latest"
+
+
+def _detect_exposed_ports(client: "docker.DockerClient", image_tag: str) -> List[str]:
+    """Read the built image's EXPOSE directive(s) instead of asking admins
+    to duplicate that information in the challenge form. Docker containers
+    inherit ExposedPorts from the image automatically at create time — we
+    only need this list ourselves to tell participants which port to
+    connect to. Returns e.g. ["1337/tcp"]; empty if the Dockerfile has no
+    EXPOSE at all (still valid — some challenges are pure reverse-shell).
+    """
+    try:
+        img = client.images.get(image_tag)
+        exposed = img.attrs.get("Config", {}).get("ExposedPorts") or {}
+        return sorted(exposed.keys())
+    except (APIError, ImageNotFound):
+        return []
 
 
 _buildkit_ok: Optional[bool] = None
@@ -330,7 +351,6 @@ def spawn_instance(
     owner_id: int,
     challenge_ref: str,
     build_path: Path,
-    ports: Optional[List[str]] = None,
     security: Optional[SecurityProfile] = None,
     ttl_seconds: Optional[int] = None,
 ) -> SpawnResult:
@@ -339,6 +359,11 @@ def spawn_instance(
     Idempotent: if this (owner, challenge_ref) already has a tracked
     instance, returns it rather than spawning a duplicate — mirrors the DB
     unique constraint on (owner_type, owner_id, challenge_ref).
+
+    No port is ever published to the host (see _build_secure_host_config).
+    Participants reach the container directly at its own routed IP over the
+    VPN, so the ports the container listens on are read straight from the
+    Dockerfile's EXPOSE metadata after build — nothing to configure here.
     """
     existing = db.find_instance(owner_type, owner_id, challenge_ref)
     if existing is not None:
@@ -357,17 +382,14 @@ def spawn_instance(
     if not ok:
         return SpawnResult(success=False, error=build_error)
 
+    exposed_ports = _detect_exposed_ports(client, image_tag)
+
     name = container_name_for(challenge_ref, owner_type, owner_id)
     expires_at = None
     if ttl_seconds is not None:
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
 
-    # Ports look like "80/tcp" — publish each on an ephemeral host port.
-    # Built into the SAME host_config call as the security profile so
-    # hardening (cap_drop, memory/cpu/pids limits) never gets silently
-    # dropped just because the challenge also exposes ports.
-    port_bindings = {p: None for p in ports} if ports else None
-    host_cfg = _build_secure_host_config(client, profile, port_bindings=port_bindings)
+    host_cfg = _build_secure_host_config(client, profile)
 
     container = None
     assigned_ip: Optional[str] = None
@@ -385,13 +407,13 @@ def spawn_instance(
                 name=name,
                 networking_config=networking_cfg,
                 host_config=host_cfg,
-                ports=[tuple(p.split("/")) for p in ports] if ports else None,
                 labels={
                     MANAGED_LABEL: "true",
                     OWNER_TYPE_LABEL: owner_type,
                     OWNER_ID_LABEL: str(owner_id),
                     CHALLENGE_LABEL: challenge_ref,
                     EXPIRES_LABEL: expires_at or "",
+                    PORTS_LABEL: ",".join(exposed_ports),
                 },
             )
             client.api.start(created["Id"])
@@ -413,7 +435,6 @@ def spawn_instance(
 
     assigned_ip = _live_container_ip(container, network_name) or assigned_ip
     container.reload()
-    published_ports = _extract_published_ports(container)
 
     try:
         instance = db.add_instance(
@@ -423,7 +444,7 @@ def spawn_instance(
             owner_id=owner_id,
             challenge_ref=challenge_ref,
             assigned_ip=assigned_ip,
-            ports=json.dumps(published_ports),
+            ports=json.dumps(exposed_ports),
             expires_at=expires_at,
         )
     except Exception as e:
@@ -439,15 +460,6 @@ def spawn_instance(
         challenge_ref, owner_type, owner_id, assigned_ip, profile.summary(),
     )
     return SpawnResult(success=True, instance=instance)
-
-
-def _extract_published_ports(container) -> dict:
-    ports = container.attrs.get("NetworkSettings", {}).get("Ports") or {}
-    out = {}
-    for container_port, bindings in ports.items():
-        if bindings:
-            out[container_port] = bindings[0].get("HostPort")
-    return out
 
 
 def release_instance(db: DatabaseManager, container_id: str) -> bool:
@@ -527,12 +539,13 @@ def adopt_untracked(db: DatabaseManager) -> int:
         network_name = bridge_name(octet) if octet else ""
         ip = _live_container_ip(c, network_name) or ""
         expires = labels.get(EXPIRES_LABEL) or None
+        ports = [p for p in (labels.get(PORTS_LABEL) or "").split(",") if p]
         try:
             db.add_instance(
                 container_id=c.id, container_name=c.name,
                 owner_type=owner_type, owner_id=int(owner_id),
                 challenge_ref=challenge_ref, assigned_ip=ip,
-                ports=json.dumps(_extract_published_ports(c)),
+                ports=json.dumps(ports),
                 expires_at=expires, status=c.status,
             )
             adopted += 1

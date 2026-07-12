@@ -65,7 +65,12 @@ class EdoChallenge(Challenges):
     # than pulling a pre-built image — matches how edo's own docker_mgr
     # works, and means admins don't need a separate registry push step.
     build_path = db.Column(db.String(512))
-    exposed_ports = db.Column(db.String(256))        # CSV: "80/tcp,443/tcp"
+    # No exposed_ports column — the daemon reads the built image's own
+    # EXPOSE metadata after each build and reports it back per instance
+    # (see EdoInstance.host_ports). No host port is ever published (see
+    # daemon/edo_core/containers.py's _build_secure_host_config), so this
+    # value was never anything but a display hint duplicating the
+    # Dockerfile — removed rather than kept in sync by hand.
     cpu_limit = db.Column(db.Float, default=1.0)     # CPUs (Docker --cpus)
     memory_limit_mb = db.Column(db.Integer, default=512)
     pids_limit = db.Column(db.Integer, default=256)
@@ -151,10 +156,14 @@ class EdoInstance(db.Model):
     # Daemon-side identifiers. container_id is None until the spawn RPC returns.
     container_id = db.Column(db.String(64), unique=True)
     container_name = db.Column(db.String(128))
-    # Where the participant connects (their per-owner subnet address + any
-    # published ports). Populated once the daemon reports back.
+    # Where the participant connects: their container's own routed IP on
+    # the owner's subnet, over the VPN — never a host-published port (see
+    # daemon/edo_core/containers.py). Populated once the daemon reports
+    # back. Despite the column name (kept to avoid a migration), this is a
+    # JSON LIST of ports the container listens on, e.g. ["1337/tcp"], read
+    # from the built image's own EXPOSE metadata — not a host-port mapping.
     assigned_ip = db.Column(db.String(64))
-    host_ports = db.Column(db.String(256))  # JSON: {"80/tcp": "31337", ...}
+    host_ports = db.Column(db.String(256))
 
     status = db.Column(db.String(24), default="pending", nullable=False)
     # status ∈ {pending, running, expired, stopped, error, orphaned}

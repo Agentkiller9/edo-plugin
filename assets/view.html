@@ -56,10 +56,11 @@
 
     let remaining = inst.remaining_seconds;
     function firstPort() {
+      // A list of ports the container listens on (Dockerfile EXPOSE) —
+      // connect directly to assigned_ip on these, no host-port mapping.
       try {
-        const obj = JSON.parse(inst.host_ports || "{}");
-        const vals = Object.values(obj);
-        return vals.length ? vals[0] : "?";
+        const ports = JSON.parse(inst.host_ports || "[]");
+        return ports.length ? ports[0].split("/")[0] : "?";
       } catch (e) {
         return "?";
       }

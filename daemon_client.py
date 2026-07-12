@@ -110,13 +110,17 @@ class EdoDaemonClient:
         owner_id: int,
         challenge_ref: str,
         build_path: str,
-        exposed_ports: Optional[list] = None,
         security: Optional[dict] = None,
         ttl_seconds: Optional[int] = None,
     ) -> dict:
         """
         Idempotently spawn (or return the existing) container for
         (owner_type, owner_id, challenge_ref).
+
+        No port is ever published to the host — the daemon reads which
+        ports the built image EXPOSEs and reports them back in the
+        response; the participant connects directly to assigned_ip over
+        the VPN, never via a host port.
 
         Returns: {container_id, container_name, assigned_ip, ports,
                   expires_at, status}
@@ -128,7 +132,6 @@ class EdoDaemonClient:
                 "owner_id": owner_id,
                 "challenge_ref": challenge_ref,
                 "build_path": build_path,
-                "ports": exposed_ports or [],
                 "security": security or {},
                 "ttl_seconds": ttl_seconds,
             },
