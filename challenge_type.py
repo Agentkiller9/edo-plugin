@@ -25,6 +25,45 @@ from CTFd.plugins.flags import get_flag_class
 
 from .models import EdoChallenge, EdoFlagSolve, EdoFlagWeight
 
+_INT_FIELDS = {
+    "value", "initial_value", "minimum_value", "decay",
+    "memory_limit_mb", "pids_limit", "ttl_seconds",
+    "max_attempts", "position",
+}
+_FLOAT_FIELDS = {"cpu_limit"}
+_BOOL_FIELDS = {"read_only_rootfs"}
+
+
+def _coerce_field(key: str, val):
+    """
+    Form/JSON submissions from CTFd's admin JS always arrive as strings
+    (or, for a JSON body, sometimes native bools) — the frontend has no
+    idea our columns are typed. An empty string for an optional numeric
+    field (e.g. a blank TTL override) would otherwise get inserted as ''
+    into an INTEGER column, which MariaDB's strict mode rejects with an
+    unhandled exception — a bare 500 with no useful message — rather than
+    a friendly validation error.
+    """
+    if key in _INT_FIELDS:
+        if val in (None, ""):
+            return None
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return None
+    if key in _FLOAT_FIELDS:
+        if val in (None, ""):
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+    if key in _BOOL_FIELDS:
+        if isinstance(val, bool):
+            return val
+        return str(val).lower() in ("true", "1", "on", "yes")
+    return val
+
 
 class EdoChallengeType(BaseChallenge):
     id = "edo"
@@ -48,16 +87,16 @@ class EdoChallengeType(BaseChallenge):
     @classmethod
     def create(cls, request):
         data = request.form or request.get_json() or {}
+        fields = {
+            "name", "description", "category", "value", "state", "attribution",
+            "difficulty", "scoring_mode",
+            "initial_value", "minimum_value", "decay",
+            "build_path",
+            "cpu_limit", "memory_limit_mb", "pids_limit",
+            "read_only_rootfs", "ttl_seconds",
+        }
         challenge = EdoChallenge(**{
-            k: v for k, v in data.items()
-            if k in {
-                "name", "description", "category", "value", "state", "attribution",
-                "difficulty", "scoring_mode",
-                "initial_value", "minimum_value", "decay",
-                "build_path",
-                "cpu_limit", "memory_limit_mb", "pids_limit",
-                "read_only_rootfs", "ttl_seconds",
-            }
+            k: _coerce_field(k, v) for k, v in data.items() if k in fields
         })
         db.session.add(challenge)
         db.session.commit()
@@ -108,7 +147,7 @@ class EdoChallengeType(BaseChallenge):
         }
         for key, val in data.items():
             if key in editable:
-                setattr(challenge, key, val)
+                setattr(challenge, key, _coerce_field(key, val))
         db.session.commit()
         return challenge
 
