@@ -67,6 +67,13 @@ CHALLENGE_LABEL = "edo.challenge_ref"
 EXPIRES_LABEL = "edo.expires_at"
 PORTS_LABEL = "edo.ports"
 
+# access_mode="public" challenges (see spawn_instance's publish_ports) get
+# host ports from this fixed, narrow range instead of Docker's default
+# ephemeral span (32768-60999) — a firewall in front of this host only
+# needs one small range opened, not the whole ephemeral space.
+PUBLIC_PORT_RANGE_START = int(os.environ.get("EDO_PUBLIC_PORT_RANGE_START", "40000"))
+PUBLIC_PORT_RANGE_END = int(os.environ.get("EDO_PUBLIC_PORT_RANGE_END", "41000"))
+
 
 @dataclass
 class SecurityProfile:
@@ -104,7 +111,7 @@ class SecurityProfile:
 def _build_secure_host_config(
     client: "docker.DockerClient",
     profile: SecurityProfile,
-    publish_ports: Optional[List[str]] = None,
+    publish_ports: Optional[dict] = None,
 ) -> dict:
     """
     By default never sets port_bindings. Docker's host-port publishing
@@ -119,9 +126,11 @@ def _build_secure_host_config(
     admin has opted into access_mode="public" (see EdoChallenge.access_mode
     / models.py), bypassing that isolation is the intended behavior, not a
     regression of it — the whole point is reachability without a VPN, same
-    as a normal public web challenge. Each entry gets bound to host port
-    None (0), i.e. Docker picks a free ephemeral port — every owner's
-    container needs its own, there's no fixed port to reuse across owners.
+    as a normal public web challenge. It's a {container_port: host_port}
+    mapping — explicit host ports (from PUBLIC_PORT_RANGE_START/_END, see
+    _allocate_public_ports), not Docker's own random-ephemeral-port
+    behavior, so a firewall in front of this host only needs one small
+    range opened rather than the whole ephemeral span.
     """
     kwargs: dict = {"restart_policy": {"Name": profile.restart_policy}}
     security_opt: List[str] = []
@@ -143,7 +152,7 @@ def _build_secure_host_config(
         kwargs["read_only"] = True
         kwargs["tmpfs"] = {"/tmp": "rw,size=64m,exec"}
     if publish_ports:
-        kwargs["port_bindings"] = {port: None for port in publish_ports}
+        kwargs["port_bindings"] = dict(publish_ports)
     return client.api.create_host_config(**kwargs)
 
 
@@ -339,11 +348,52 @@ def find_next_owner_ip(db: DatabaseManager, owner_type: str, owner_id: int, octe
     return iter_subnet_hosts(owner_subnet(octet), blocked)
 
 
-def _is_address_in_use(err) -> bool:
+def _is_resource_conflict(err) -> bool:
+    """Matches both an IP-allocation conflict (owner subnet already has
+    that address) and a host-port conflict (access_mode="public" — see
+    _allocate_public_ports) — Docker's actual wording differs ("address
+    already in use" vs "port is already allocated"), but the caller's
+    response is identical either way: retry with a fresh IP AND fresh
+    ports together, not worth distinguishing which one actually conflicted.
+    """
     msg = str(err).lower()
     return (
         "address already in use" in msg or "is already in use" in msg
         or "no available" in msg or "overlaps" in msg
+        or "already allocated" in msg
+    )
+
+
+def _used_public_ports(db: DatabaseManager) -> set:
+    """Every host port currently published across all tracked instances —
+    scanned fresh each call (small N, an owner's whole instance list) same
+    as find_next_owner_ip does for IPs."""
+    used: set = set()
+    for inst in db.get_all_instances():
+        if not inst.published_ports:
+            continue
+        try:
+            used.update(int(p) for p in json.loads(inst.published_ports).values())
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return used
+
+
+def _allocate_public_ports(db: DatabaseManager, count: int, exclude: set = frozenset()) -> List[int]:
+    """Pick `count` distinct free host ports from the configured public
+    range (PUBLIC_PORT_RANGE_START/_END). Raises RuntimeError if the range
+    is exhausted — a real operational limit an admin needs to widen the
+    range for, not something to retry past.
+    """
+    used = _used_public_ports(db) | {int(p) for p in exclude}
+    chosen: List[int] = []
+    for port in range(PUBLIC_PORT_RANGE_START, PUBLIC_PORT_RANGE_END + 1):
+        if port not in used:
+            chosen.append(port)
+            if len(chosen) == count:
+                return chosen
+    raise RuntimeError(
+        f"no free ports left in range {PUBLIC_PORT_RANGE_START}-{PUBLIC_PORT_RANGE_END}"
     )
 
 
@@ -419,18 +469,25 @@ def spawn_instance(
     if ttl_seconds is not None:
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
 
-    host_cfg = _build_secure_host_config(
-        client, profile, publish_ports=exposed_ports if publish_ports else None
-    )
-
     container = None
     assigned_ip: Optional[str] = None
-    tried: List[str] = []
+    tried_ips: List[str] = []
+    tried_ports: set = set()
     last_error = ""
     for _ in range(8):
         assigned_ip = find_next_owner_ip(db, owner_type, owner_id, octet)
-        if assigned_ip in tried:
+        if assigned_ip in tried_ips:
             continue
+
+        port_map: Optional[dict] = None
+        if publish_ports and exposed_ports:
+            try:
+                host_ports = _allocate_public_ports(db, len(exposed_ports), exclude=tried_ports)
+            except RuntimeError as e:
+                return SpawnResult(success=False, error=str(e))
+            port_map = dict(zip(exposed_ports, host_ports))
+        host_cfg = _build_secure_host_config(client, profile, publish_ports=port_map)
+
         try:
             endpoint_cfg = client.api.create_endpoint_config(ipv4_address=assigned_ip)
             networking_cfg = client.api.create_networking_config({network_name: endpoint_cfg})
@@ -457,8 +514,10 @@ def spawn_instance(
                 client.containers.get(name).remove(force=True)
             except (APIError, NotFound):
                 pass
-            if _is_address_in_use(e):
-                tried.append(assigned_ip)
+            if _is_resource_conflict(e):
+                tried_ips.append(assigned_ip)
+                if port_map:
+                    tried_ports.update(port_map.values())
                 continue
             return SpawnResult(success=False, error=f"run failed: {last_error}")
 
