@@ -173,8 +173,17 @@ def _sweep_expired():
         try:
             if inst.container_id:
                 client.container_release_instance(inst.container_id)
-            inst.status = "expired"
             _audit("scheduler", "teardown_expired", inst)
+            # Delete rather than mark "expired" — the UNIQUE constraint on
+            # (challenge_id, owner_type, owner_id) applies to every row
+            # regardless of status, so a soft-expired row would permanently
+            # block that owner from ever spawning this challenge again.
+            # (The error branch below deliberately keeps its row instead —
+            # a daemon RPC failure is an operational problem worth
+            # surfacing to admins via the Live Instances table, not
+            # something to silently sweep away; admin force-teardown is
+            # the recovery path once the daemon issue is resolved.)
+            db.session.delete(inst)
         except DaemonError as e:
             inst.status = "error"
             inst.error_message = f"teardown failed: {e}"
@@ -216,10 +225,23 @@ def _reconcile():
         inst.last_reconciled_at = datetime.utcnow()
 
         if live_row is None:
-            inst.status = "orphaned"
-            inst.error_message = "container missing on host at reconcile"
-            _audit("reconciler", "orphan_detected", inst)
+            # Confirmed gone — the daemon's own list doesn't have it (it
+            # already pruned its side via NotFound). Safe to delete rather
+            # than mark "orphaned": nothing left to track, and leaving the
+            # row around would trip the UNIQUE constraint on (challenge_id,
+            # owner_type, owner_id) and permanently block this owner from
+            # respawning. Audit first so the event is still visible.
+            _audit("reconciler", "orphan_detected", inst, {"container_id": inst.container_id})
+            db.session.delete(inst)
         elif live_row.get("status") not in ("running", "created"):
+            # Exists but isn't running (e.g. crashed) — NOT deleted here.
+            # Unlike the orphaned case, the daemon's own SQLite still has a
+            # row for this container_id; deleting ours while that stays
+            # around risks a future spawn_instance() on the daemon side
+            # returning this stale, no-longer-running instance as if it
+            # were live. Left as a known follow-up: the daemon's reconcile()
+            # should actively remove genuinely dead containers so this
+            # collapses into the orphaned case above over time.
             inst.status = "stopped"
             _audit("reconciler", "container_stopped", inst,
                    {"daemon_status": live_row.get("status")})

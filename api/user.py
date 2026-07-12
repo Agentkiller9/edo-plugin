@@ -183,10 +183,19 @@ def teardown_instance(instance_id: int):
         if inst.container_id:
             _client().container_release_instance(inst.container_id)
     except DaemonError as e:
-        # Best-effort: still mark stopped so it stops counting against quota.
-        inst.error_message = f"teardown_failed: {e}"
-    inst.status = "stopped"
+        # Best-effort: still remove the row so the owner isn't permanently
+        # locked out of respawning (see note on the unique constraint
+        # below). The daemon's own spawn is idempotent by (owner,
+        # challenge_ref), and the reconciler heals any drift if the
+        # container is somehow still alive despite this RPC failing.
+        logger.warning("teardown RPC failed for instance %s: %s", instance_id, e)
     _audit("user", "teardown", inst)
+    # Delete rather than mark "stopped": the UNIQUE constraint on
+    # (challenge_id, owner_type, owner_id) applies to every row regardless
+    # of status, so a soft-stopped row would permanently block that owner
+    # from ever spawning this challenge again. History lives in the audit
+    # log (written just above); EdoInstance only ever tracks what's live.
+    db.session.delete(inst)
     db.session.commit()
     return jsonify(success=True)
 

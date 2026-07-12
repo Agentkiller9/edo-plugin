@@ -156,8 +156,12 @@ def force_teardown(instance_id: int):
     try:
         if inst.container_id:
             _client().container_release_instance(inst.container_id)
-        inst.status = "stopped"
         _audit("admin", "force_teardown", inst)
+        # Delete rather than mark "stopped" — the UNIQUE constraint on
+        # (challenge_id, owner_type, owner_id) applies to every row
+        # regardless of status, so a soft-stopped row would permanently
+        # block that owner from ever spawning this challenge again.
+        db.session.delete(inst)
         db.session.commit()
         return jsonify(success=True)
     except DaemonError as e:
@@ -172,9 +176,13 @@ def kill_switch():
     """
     try:
         result = _client().kill_switch()
+        # Delete rather than mark "stopped" — see force_teardown() above for
+        # why: the UNIQUE constraint on (challenge_id, owner_type, owner_id)
+        # would otherwise permanently block every owner whose instance the
+        # kill switch touched from ever respawning that challenge again.
         EdoInstance.query.filter(
             EdoInstance.status.in_(("pending", "running"))
-        ).update({"status": "stopped"}, synchronize_session=False)
+        ).delete(synchronize_session=False)
         db.session.add(EdoAuditLog(actor="admin", event="kill_switch", details=json.dumps(result)))
         db.session.commit()
         return jsonify(success=True, **result)
