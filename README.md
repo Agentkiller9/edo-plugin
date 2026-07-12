@@ -13,17 +13,31 @@ below for why.
 ## What it does
 
 - **WireGuard VPN**: Admins bulk-generate peers; participants download their
-  `.conf` from the dashboard.
+  `.conf` (named `<username>.conf`) from a dedicated **VPN** tab in the main
+  nav bar, which also carries a step-by-step connection guide for both
+  Windows (official WireGuard app) and Linux (`wireguard-tools`/`wg-quick`,
+  or NetworkManager import).
 - **Per-owner Docker isolation**: One dedicated container per (challenge,
   owner) — "owner" is a team in team-mode CTFd, or an individual user in
   user-mode. Each owner gets its own Docker network and subnet; the daemon's
   iptables rules block one owner's containers from ever reaching another's,
   and a WireGuard peer can only route into the container subnet of its own
   owner (enforced server-side, not just via the client's AllowedIPs).
+- **Per-challenge access mode**: "VPN subnet" (default) keeps the isolation
+  above — no host port is ever published. "Server public IP" is an explicit,
+  admin-chosen opt-out per challenge (typical for web-category challenges):
+  the daemon instead publishes each exposed port to a host port drawn from a
+  small, fixed, admin-configurable range (not Docker's full ephemeral
+  32768-60999 span, so a firewall in front of the host only needs one small
+  range opened), and participants connect over the plain internet, no VPN
+  required. See **Security notes** for the isolation trade-off this implies.
 - **Multi-flag challenges**: A single challenge can have several flags —
   CTFd's own native Flags table and flag-editor UI, unmodified. The only
   addition is a percentage weight per flag, so partial credit works and the
-  challenge modal shows live "N/M flags captured" progress.
+  challenge modal shows one input+submit box per flag with live "N/M flags
+  captured" progress. Submission goes through a dedicated plugin endpoint,
+  not CTFd's native attempt endpoint — see **Design notes** for why that
+  distinction actually matters on the CTFd version this targets.
 - **Difficulty tiers**: Easy (green) / Medium (yellow) / Hard (red) / Very
   Hard (purple), rendered on challenge cards.
 - **Scoring**: Static or dynamic (linear decay).
@@ -31,7 +45,8 @@ below for why.
   the daemon also caps concurrent container builds so a burst of "spawn"
   clicks can't fork off dozens of `docker build`s at once.
 - **Lifecycle**: Configurable TTL, "Extend Time" that unlocks under 10 min
-  remaining, live countdown, background sweeper for expiry.
+  remaining, live countdown, a "Target" address with a copy-to-clipboard
+  button, background sweeper for expiry.
 - **Reconciliation**: A worker polls the daemon and heals DB drift when
   containers crash or are killed out-of-band. Everything is audited. The
   daemon itself also adopts orphaned containers back on restart rather than
@@ -39,6 +54,10 @@ below for why.
 - **Kill switch**: One admin action tears down every tracked container
   across every owner. Leaves VPN access intact — it's an infra reset, not a
   lockout.
+- **Owner progress reset**: CTFd's native "delete solve" admin action only
+  removes the scoreboard row — it has no plugin hook, so it can't clear this
+  plugin's own per-flag progress tracking. The challenge edit page has an
+  "Owner Progress" panel specifically for resetting both together.
 
 ## Architecture
 
@@ -82,6 +101,41 @@ There is no shared secret to generate, rotate, or leak.
   new table on the flag side: one row per native flag, holding what
   percentage of the challenge's value it's worth.
 
+- **Multi-flag submission does NOT go through CTFd's native attempt
+  endpoint.** This matters and is easy to get wrong by reading CTFd's
+  `master` branch instead of what's actually deployed: `master` has a
+  `"partial"` attempt status with its own `partial()` hook, letting a
+  challenge type report "correct flag, but not done yet" without inserting
+  a `Solves` row. **The pinned `ctfd/ctfd:3.7.5` image does not have this —
+  verified directly against the deployed container's source, not the
+  docs.** Its dispatcher does a plain `if status:` — any truthy `attempt()`
+  return immediately inserts `Solves` and permanently blocks every future
+  submission for that account (`if not solves:` gates whether `attempt()`
+  is even called again). So the real submission path is
+  `POST /plugins/edo_plugin/challenges/<id>/submit` (`api/user.py`), which
+  owns per-flag progress (`EdoFlagSolve`) directly and only awards the
+  scoreboard `Solves` row once every flag is found.
+  `EdoChallengeType.attempt()`/`solve()`/`fail()` are kept only as a safe
+  fallback for CTFd's own "Preview challenge" admin feature, which still
+  posts to the native endpoint — they're written to never over- or
+  under-award even though they can't represent partial progress.
+
+- **The participant challenge modal has no inline `<script>` — this is
+  required, not a style choice.** CTFd's core-beta theme inserts a
+  challenge's rendered HTML via Alpine's `x-html` directive
+  (`challenges.html`: `x-html="$store.challenge.data.view"`), which sets
+  `.innerHTML` under the hood — and per the DOM spec, `<script>` tags
+  inserted through `.innerHTML` are never executed by the browser, silently,
+  no error. All of `view.html`'s participant-facing behavior (flag boxes,
+  submission, the instance panel) lives in `view.js`'s `postRender()` hook
+  instead, which CTFd actually calls after every real challenge display —
+  confirmed against the deployed theme bundle. (The one place an inline
+  `<script>` *would* run is CTFd's admin "Preview challenge" feature, which
+  inserts markup via jQuery's `.append()` instead of `x-html` — jQuery
+  specifically evals `<script>` tags it appends, unlike raw `innerHTML`.
+  That's a real trap: testing only through Preview can look like an inline
+  script works when it never will for actual participants.)
+
 - **edo's real container model has no owner concept.** edo's
   `docker_mgr.py` names containers `edo_<challenge>` — no team/user
   component — so only one instance of a challenge can exist at a time,
@@ -100,6 +154,20 @@ There is no shared secret to generate, rotate, or leak.
   daemon's own SQLite (`daemon/edo_core/db.py`) — the plugin never needs to
   know an owner's octet, only its `(owner_type, owner_id)`.
 
+- **A challenge's `build_path` cannot live under `/home`, `/root`, or
+  `/run/user`.** `edo-daemon.service` sets `ProtectHome=yes`, which the
+  systemd docs describe as "mostly equivalent to setting [those three
+  trees] in `InaccessiblePaths=`" — the daemon literally cannot see
+  anything under them, even though the files are genuinely there and
+  readable outside the sandbox (`spawn_instance` fails with a
+  hard-to-place "no Dockerfile in ..." for a file that visibly exists).
+  Tried carving an exception with `ReadOnlyPaths=`/`BindReadOnlyPaths=` for
+  a specific subdirectory — neither actually worked against this
+  `InaccessiblePaths`-style masking (verified via `nsenter` into the
+  running daemon's own mount namespace: no submount ever appeared). The
+  fix is operational, not code: keep challenge content under something
+  like `/opt/...` or `/srv/...`.
+
 ## Layout
 
 ```
@@ -107,32 +175,47 @@ edo_plugin/                        (folder name when installed under CTFd/plugin
 ├── __init__.py                    CTFd load(app) — tables, blueprint, scheduler
 ├── config.py                      Env-driven defaults, difficulty tiers
 ├── owner.py                       resolve_owner() — the team/user abstraction
-├── models.py                      EdoChallenge, EdoFlagWeight, EdoFlagSolve,
-│                                  EdoInstance, EdoPeer, EdoSettings, EdoAuditLog
+├── models.py                      EdoChallenge (incl. access_mode), EdoFlagWeight,
+│                                  EdoFlagSolve, EdoInstance (incl. published_ports),
+│                                  EdoPeer, EdoSettings, EdoAuditLog, EdoWorkerLease
 ├── challenge_type.py              EdoChallengeType — multi-flag via native Flags,
-│                                  decay scoring, partial credit
+│                                  decay scoring; attempt()/solve()/fail() are the
+│                                  native-endpoint fallback only, see Design notes
 ├── daemon_client.py               RPC client (stdlib-only, no signing)
 ├── scheduler.py                   APScheduler jobs: TTL sweep + reconciler
-├── decorators.py                  rate_limited, owner_required
+├── decorators.py                  check_rate_limit, owner_required
 ├── api/
-│   ├── admin.py                   /plugins/edo_plugin/admin/*   (admins_only)
-│   └── user.py                    /plugins/edo_plugin/*         (authed_only, owner_required)
+│   ├── admin.py                   /plugins/edo_plugin/admin/*   (admins_only) —
+│   │                              settings, flag weights, owner-progress reset,
+│   │                              live instances, audit log, kill switch, WG bulk-gen
+│   └── user.py                    /plugins/edo_plugin/*         (authed_only,
+│                                  owner_required) — dashboard, VPN, instance
+│                                  lifecycle, and the primary flag /submit route
 ├── assets/                        Served at /plugins/edo_plugin/assets/*
-│   ├── create.html / update.html / view.html    challenge-type modals
-│   ├── create.js  / update.js  / view.js        CTFd asset shims
+│   ├── create.html / update.html / view.html    challenge-type modals — view.html
+│   │                                             is pure markup, no inline <script>
+│   │                                             (see Design notes)
+│   ├── create.js  / update.js  / view.js        CTFd asset shims — view.js's
+│   │                                             postRender() does all the real
+│   │                                             participant-facing work
 │   └── style.css                                difficulty tier colors
-├── templates/                     Jinja templates (server-rendered)
+├── templates/                     Jinja templates (real server-rendered pages —
+│                                  not injected via x-html, inline scripts are fine)
 │   ├── admin/edo_settings.html
-│   └── user/edo_dashboard.html
+│   └── user/
+│       ├── edo_dashboard.html     Instances dashboard
+│       └── edo_vpn.html           VPN tab: config download + Windows/Linux guide
 └── daemon/                        Ships with the plugin but installed on the
     ├── edo_daemon.py              HOST as root — not inside the CTFd container.
     ├── edo_core/                  The daemon's actual logic (see Design notes).
     │   ├── db.py                  SQLite: peers, owner_octets, instances
     │   ├── wireguard.py           WG keygen, config render, live-apply
     │   ├── network.py             Per-owner subnets + iptables isolation
-    │   └── containers.py          Per-owner Docker networks + spawn/release
+    │   └── containers.py          Per-owner Docker networks + spawn/release;
+    │                              fixed-range host-port allocation for
+    │                              access_mode="public" (_allocate_public_ports)
     ├── edo-daemon.service
-    ├── daemon.env.example
+    ├── daemon.env.example         Includes EDO_PUBLIC_PORT_RANGE_START/_END
     └── requirements.txt           Daemon-side deps (docker SDK)
 ```
 
@@ -258,12 +341,23 @@ admin UI. Defaults come from `config.py`:
 | `extend_threshold_seconds` | 600 | Button unlocks when remaining ≤ this |
 | `submit_rate_limit` / `_window` | 10 / 60 | Per-owner-per-challenge attempts / seconds |
 | `vpn_server_endpoint` | vpn.example.com:51820 | Written into every .conf |
+| `public_ip` | 203.0.113.1 | Shown to participants (with the published port appended) for challenges set to "Server public IP" access mode |
 | `ttl_check_interval_seconds` | 15 | Sweeper cadence |
 | `reconcile_interval_seconds` | 60 | Reconciler cadence |
 
 VPN/container subnets (`10.8.0.0/24` for peers, `10.9.0.0/16` subdivided
 per owner) are fixed daemon-side infrastructure — not admin-editable, since
 they're *actual* infra state, not CTFd *intent*.
+
+The daemon has its own env-based knobs in `/etc/edo/daemon.env` (see
+`daemon/daemon.env.example`), notably `EDO_PUBLIC_PORT_RANGE_START`/`_END`
+(default `40000`-`41000`) — the host port range "Server public IP" mode
+challenges draw from. **Open exactly this range, TCP+UDP, in whatever
+firewall or cloud security group sits in front of the host**, or published
+ports will work locally but won't be reachable from the actual internet
+(Docker's own port publishing works regardless of this plugin's firewall
+rules — see Security notes — but an external cloud firewall is a separate
+layer this plugin has no control over).
 
 ## Creating a challenge
 
@@ -272,14 +366,31 @@ In the admin UI, pick type **edo** when creating a challenge. You get:
 - Difficulty selector (color-coded)
 - Static value or dynamic decay (initial / minimum / decay-slots)
 - Optional instance config: build path (a host directory containing a
-  Dockerfile — the daemon builds from it per-owner, no registry push step),
-  exposed ports, CPU / memory / PIDs limits, read-only rootfs, TTL override
+  Dockerfile, **outside `/home`, `/root`, and `/run/user`** — see Design
+  notes — the daemon builds from it per-owner, no registry push step),
+  exposed ports auto-detected from the image, CPU / memory / PIDs limits,
+  read-only rootfs, TTL override
+- **Access Mode**: "VPN subnet" (default) or "Server public IP" — see
+  **What it does** above
 - **Flags**: add/edit/delete from CTFd's own native **Flags** tab (regex vs
   static, case sensitivity — all standard CTFd). This plugin adds a
   **Flag Weights** panel below the instance settings where you assign what
   percentage of the challenge's value each flag is worth; weights should
   sum to 100 (a warning shows if they don't, but it won't block saving
   mid-edit).
+- **Owner Progress**: below Flag Weights, lists every owner with any
+  progress on this challenge and a **Reset** button. Use this instead of
+  CTFd's native "delete solve" action (Teams/Users admin pages) — that only
+  removes the scoreboard row, not this plugin's own per-flag tracking, so a
+  participant's flag boxes would still show everything solved afterward.
+
+A category named **B2R** gets one participant-facing display quirk: the
+"Target" address never shows a port in **vpn** access mode (the assigned
+IP is already unique per owner there, so the port is cosmetic). It's
+*always* shown in **public** access mode, though, even for B2R — the
+public IP there is shared across every owner's instance of that challenge,
+so the port is the only thing pointing at any one specific instance rather
+than the whole host.
 
 ## Security notes
 
@@ -297,6 +408,26 @@ In the admin UI, pick type **edo** when creating a challenge. You get:
 - Containers from different owners can never reach each other, even though
   they all run on the same host, via a blanket per-pool DROP rule between
   the isolation and egress-containment rules.
+- **`access_mode="public"` is a deliberate, per-challenge, admin-chosen
+  exception to all of the isolation above — not a regression of it.**
+  Docker's host-port publishing installs its own NAT/DNAT rules on
+  `PREROUTING`, evaluated *before* the daemon's `EDO_FORWARD` isolation
+  rules in the `filter` table ever see the packet — a published port is
+  reachable by anyone, VPN or not, same as a normal public web challenge.
+  That's only ever true for a challenge an admin explicitly set to
+  "Server public IP"; every other challenge keeps the default VPN-only
+  model. Ports are drawn from a fixed range
+  (`EDO_PUBLIC_PORT_RANGE_START`/`_END`, see Configuration) rather than
+  Docker's random default so an operator only has to open one small,
+  predictable range in front of the host.
+- **Plain HTTP has real limits.** WireGuard config downloads, session
+  cookies, and login credentials all cross the network in cleartext if
+  CTFd isn't put behind TLS. It also breaks `navigator.clipboard`
+  entirely (browsers only expose it in a "secure context" — HTTPS or
+  localhost), which is why the "Target" copy button falls back to
+  `document.execCommand("copy")` when the modern API isn't there. Put a
+  reverse proxy with a real certificate in front of this for anything
+  beyond local testing.
 - The daemon runs with `CAP_NET_ADMIN` / `CAP_NET_RAW` only,
   `NoNewPrivileges`, `ProtectSystem=strict`.
 - Container spawns drop all caps except what's explicitly opted into,
@@ -325,7 +456,8 @@ In the admin UI, pick type **edo** when creating a challenge. You get:
 
 `/plugins/edo_plugin/admin/settings` is a single page covering:
 
-- Runtime settings (container caps, TTLs, rate limits, VPN endpoint)
+- Runtime settings (container caps, TTLs, rate limits, VPN endpoint,
+  public IP for "Server public IP" access-mode challenges)
 - **Live instances** — every tracked container across every owner, with a
   per-row force-stop button
 - **Audit log** — the last 100 infrastructure events (spawns, teardowns,
@@ -334,6 +466,9 @@ In the admin UI, pick type **edo** when creating a challenge. You get:
   peers intact)
 - **Generate all VPN peers** — bulk-provisions a WireGuard peer for every
   active user that doesn't have one yet
+
+Each individual challenge's own edit page additionally has a **Flag
+Weights** panel and an **Owner Progress** panel (see Creating a challenge).
 
 ## Development status
 
@@ -347,6 +482,27 @@ code — not stubs. Known gaps before calling this production-ready:
 - **Client-side WireGuard keys** (participant generates their own keypair,
   server never sees the private key) are supported by the daemon
   (`wg.ensure_peer` takes an optional public key) but no UI exposes it yet.
+- **No TLS out of the box.** The bundled `docker/docker-compose.yml` serves
+  plain HTTP — fine for local testing, not for a real event. Put a reverse
+  proxy with a certificate in front before going live (see Security notes
+  for what plain HTTP actually breaks/exposes).
+- **CTFd's admin "Preview challenge" feature is untested against the
+  current template structure.** It renders `view.html` client-side via
+  nunjucks against the *admin* theme's own base template (a different,
+  older jQuery-based one, not core-beta's `challenge.html`) — whether
+  `{% extends %}`/`{% block %}` resolves sensibly in that context was never
+  verified this round; `attempt()`/`solve()`/`fail()` are written to be a
+  safe fallback either way (never over/under-award), but the Preview UI
+  itself showing correctly is a separate, open question.
+- **Reconciler doesn't fully clean up a "stopped but still tracked"
+  container.** `scheduler.py`'s `_reconcile()` marks a live-but-not-running
+  container `"stopped"` rather than deleting the row, specifically because
+  the daemon's own SQLite still has an entry for it — deleting the plugin's
+  row while that stays around risks a future spawn returning the stale,
+  dead container as if it were live. The daemon's own `reconcile()` should
+  eventually prune genuinely dead containers so this collapses into the
+  "orphaned" (deleted) case over time; noted in the code as a follow-up,
+  not yet done.
 - **No automated test suite.** Everything has been verified by direct
   inspection, standalone smoke tests of the daemon's core modules, and a
   from-scratch correctness test of the leader-election algorithm — but
